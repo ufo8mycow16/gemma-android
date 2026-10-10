@@ -1,0 +1,55 @@
+package app.gemma.android
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import gemma.core.ChatMessage
+import gemma.core.ChatState
+import kotlinx.coroutines.launch
+
+private val Night = Color(0xFF02050D); private val Panel = Color(0xDD091525); private val Cyan2 = Color(0xFF5EE5FF); private val Purple2 = Color(0xFF8E7DFF); private val Muted = Color(0xFF9EB0C7)
+private enum class FinalTab { CHAT, VOICE, MEMORY, TOOLS }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable fun FinalScreen(viewModel: GemmaViewModel, onOpenSettings: () -> Unit, onRequestSpeech: () -> Unit) {
+    val state by viewModel.chat.collectAsStateWithLifecycle(); val draft by viewModel.draft.collectAsStateWithLifecycle(); val voice by viewModel.voiceEnabled.collectAsStateWithLifecycle(); val live by viewModel.liveMode.collectAsStateWithLifecycle()
+    var tab by rememberSaveable { mutableStateOf(FinalTab.CHAT) }; val drawer = rememberDrawerState(DrawerValue.Closed); val scope = rememberCoroutineScope()
+    ModalNavigationDrawer(drawerState=drawer, drawerContent={ ModalDrawerSheet(drawerContainerColor=Color(0xFF07101C)){ Spacer(Modifier.height(42.dp)); Text("GEMMA",Modifier.padding(20.dp),color=Cyan2,style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold); HorizontalDivider(color=Color(0xFF203047)); Text("Conversations",Modifier.padding(20.dp),color=Color.White,fontWeight=FontWeight.SemiBold); Text("Gemma's primary conversation",Modifier.padding(horizontal=20.dp,vertical=8.dp),color=Muted); Text("Conversation history, rename, delete and search require Vision's conversation-management API. This client will not invent local copies.",Modifier.padding(20.dp),color=Muted,style=MaterialTheme.typography.bodySmall) } }) {
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Night,Color(0xFF08172A),Night)))) { Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),verticalAlignment=Alignment.CenterVertically){ TextButton(onClick={scope.launch{drawer.open()}}){Text("☰",color=Cyan2,style=MaterialTheme.typography.titleLarge)}; Column(Modifier.weight(1f)){Text("Gemma",color=Color.White,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(state.statusLine,color=if(state.conversationId!=null)Color(0xFF63E6A6) else Muted,style=MaterialTheme.typography.labelMedium)};IconButton(onClick=onOpenSettings){Icon(Icons.Default.Settings,"Settings",tint=Muted)} }
+            Box(Modifier.weight(1f)){ when(tab){ FinalTab.CHAT->FinalChat(state,viewModel);FinalTab.VOICE->FinalVoice(state,voice,live,viewModel,onRequestSpeech);FinalTab.MEMORY->InfoPanel("Memory","Gemma's memory remains shared and authoritative on Vision. A read/search view will activate when Vision advertises the memory capability.");FinalTab.TOOLS->ToolsPanel(viewModel) } }
+            if(tab==FinalTab.CHAT) FinalComposer(state,draft,viewModel,onRequestSpeech)
+            Row(Modifier.fillMaxWidth().navigationBarsPadding().background(Color(0xF7050912)),horizontalArrangement=Arrangement.SpaceEvenly){ FinalTab.entries.forEach{t->TextButton(onClick={tab=t}){Column(horizontalAlignment=Alignment.CenterHorizontally){Text(when(t){FinalTab.CHAT->"●";FinalTab.VOICE->"◉";FinalTab.MEMORY->"◇";FinalTab.TOOLS->"⌘"},color=if(tab==t)Cyan2 else Muted);Text(t.name.lowercase().replaceFirstChar{it.uppercase()},color=if(tab==t)Cyan2 else Muted,style=MaterialTheme.typography.labelSmall)}}} }
+        } }
+    }
+}
+
+@Composable private fun FinalChat(state:ChatState,vm:GemmaViewModel){ if(state.messages.isEmpty()) Hero(state) else LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(14.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){ if(state.hasOlder)item{TextButton(onClick=vm::loadOlder){Text("Earlier messages")}};items(state.messages,key={it.key}){FinalBubble(it)} } }
+@Composable private fun Hero(state:ChatState){Column(Modifier.fillMaxSize().padding(28.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center){Box(Modifier.size(190.dp).background(Brush.radialGradient(listOf(Color(0xAA327DAB),Color(0x33184270),Color.Transparent)),CircleShape),contentAlignment=Alignment.Center){Surface(Modifier.size(145.dp),shape=CircleShape,color=Color(0xFF0A1827),border=BorderStroke(3.dp,if(state.busy)Purple2 else Cyan2)){Box(contentAlignment=Alignment.Center){Text("G",color=Color.White,style=MaterialTheme.typography.displayLarge,fontWeight=FontWeight.Light)}}};Spacer(Modifier.height(18.dp));Text("Gemma",color=Color.White,style=MaterialTheme.typography.headlineMedium);Text(if(state.busy)state.activity.ifBlank{"Thinking…"} else "Your Gemma on Vision",color=Muted)} }
+@Composable private fun FinalBubble(m:ChatMessage){val mine=m.role=="user";val c=LocalContext.current;Column(Modifier.fillMaxWidth(),horizontalAlignment=if(mine)Alignment.End else Alignment.Start){Text(if(mine)"You" else "Gemma",color=if(mine)Muted else Cyan2,style=MaterialTheme.typography.labelSmall);Surface(shape=RoundedCornerShape(20.dp),color=if(mine)Color(0xDD20375E) else Panel,border=BorderStroke(1.dp,if(mine)Color(0x554C7BD9) else Color(0x445EE5FF)),modifier=Modifier.widthIn(max=560.dp)){Text(if(m.streaming&&m.text.isBlank())"…" else m.text,Modifier.padding(15.dp),color=Color.White)};Row{TextButton(onClick={val cm=c.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager;cm.setPrimaryClip(ClipData.newPlainText("Gemma",m.text))}){Text("Copy",color=Muted,style=MaterialTheme.typography.labelSmall)};if(!mine)TextButton(onClick={}){Text("Play",color=Color(0xFF56677D),style=MaterialTheme.typography.labelSmall)}};m.problem?.let{Text(it,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)}}}
+@Composable private fun FinalComposer(state:ChatState,draft:String,vm:GemmaViewModel,mic:()->Unit){Row(Modifier.fillMaxWidth().imePadding().background(Color(0xEE050A12)).padding(10.dp),verticalAlignment=Alignment.CenterVertically){IconButton(onClick=mic,enabled=!state.busy){Text("🎙",style=MaterialTheme.typography.titleLarge)};OutlinedTextField(draft,vm::onDraftChange,Modifier.weight(1f),placeholder={Text("Message Gemma…")},shape=RoundedCornerShape(24.dp),maxLines=5);Spacer(Modifier.width(8.dp));if(state.busy)Button(onClick=vm::stop,shape=CircleShape,contentPadding=PaddingValues(14.dp)){Text("■")}else Button(onClick=vm::send,enabled=draft.isNotBlank()&&state.conversationId!=null,shape=CircleShape,contentPadding=PaddingValues(14.dp)){Text("➤")}}}
+@Composable private fun FinalVoice(state:ChatState,voice:Boolean,live:Boolean,vm:GemmaViewModel,mic:()->Unit){Column(Modifier.fillMaxSize().padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center){HeroPortrait(state);Spacer(Modifier.height(20.dp));Text(if(live)"LIVE WITH GEMMA" else "VOICE",color=Cyan2,fontWeight=FontWeight.Bold);Text(if(state.busy)state.activity.ifBlank{"Gemma is answering…"} else if(live)"Listening and replying automatically" else if(state.voiceReady)"Tiffany voice ready" else "Voice service unavailable",color=Muted);Spacer(Modifier.height(26.dp));Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){Button(onClick={vm.setVoiceEnabled(!voice)}){Text(if(voice)"🔊 Speaker" else "🔇 Muted")};Button(onClick=mic,enabled=!state.busy){Text("🎙 Talk")}};Spacer(Modifier.height(12.dp));Button(onClick={vm.setLiveMode(!live)},colors=ButtonDefaults.buttonColors(containerColor=if(live)Color(0xFF7A315F) else Color(0xFF145F82))){Text(if(live)"End Live Mode" else "Start Live Mode")};if(state.busy){Spacer(Modifier.height(12.dp));OutlinedButton(onClick=vm::stop){Text("Stop / interrupt")}};Spacer(Modifier.height(18.dp));Text("Live mode uses Android speech recognition for your side and Vision's generated Tiffany voice for Gemma. After Gemma finishes speaking, the microphone opens again automatically.",color=Muted,style=MaterialTheme.typography.bodySmall)} }
+@Composable private fun HeroPortrait(state:ChatState){Box(Modifier.size(width=260.dp,height=330.dp).background(Brush.verticalGradient(listOf(Color(0xFF12334D),Color(0xFF07111D))),RoundedCornerShape(34.dp)),contentAlignment=Alignment.Center){Box(Modifier.size(190.dp).background(Brush.radialGradient(listOf(Color(0x8865D9FF),Color.Transparent)),CircleShape),contentAlignment=Alignment.Center){Text("G",color=Color.White,style=MaterialTheme.typography.displayLarge)};Surface(Modifier.align(Alignment.BottomCenter).padding(18.dp),shape=RoundedCornerShape(20.dp),color=Color(0xCC06111D),border=BorderStroke(1.dp,if(state.busy)Purple2 else Cyan2)){Text(if(state.busy)"Just thinking…" else "Online",Modifier.padding(horizontal=18.dp,vertical=8.dp),color=Color.White)}}}
+@Composable private fun InfoPanel(title:String,body:String){Column(Modifier.fillMaxSize().padding(28.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center){Text(title,color=Color.White,style=MaterialTheme.typography.headlineMedium);Spacer(Modifier.height(12.dp));Text(body,color=Muted)}}
+@Composable private fun ToolsPanel(vm:GemmaViewModel){Column(Modifier.fillMaxSize().padding(22.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){Text("Tools",color=Color.White,style=MaterialTheme.typography.headlineMedium);ToolCard("Research","Ask Gemma to research with her existing Vision tools."){vm.onDraftChange("Research: ")};ToolCard("Code Help","Start a coding task with Gemma."){vm.onDraftChange("Help me with this code: ")};ToolCard("Image analysis","Attach/share support is being wired to Vision's existing image endpoint.",{});ToolCard("Transcribe","Requires a new Vision transcription endpoint; not faked locally.",{});ToolCard("File search","Requires the security-scoped read-only Vision file API before it can be enabled safely.",{})}}
+@Composable private fun ToolCard(title:String,body:String,onClick:()->Unit){Surface(onClick=onClick,shape=RoundedCornerShape(18.dp),color=Panel,border=BorderStroke(1.dp,Color(0x333AC7EF))){Column(Modifier.fillMaxWidth().padding(16.dp)){Text(title,color=Cyan2,fontWeight=FontWeight.Bold);Text(body,color=Muted,style=MaterialTheme.typography.bodySmall)}}}
