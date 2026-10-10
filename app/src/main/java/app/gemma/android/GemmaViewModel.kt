@@ -83,6 +83,9 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
         _developerMode.value = on
     }
 
+    /** A key never contains spaces or line breaks; pasting often adds them. */
+    private fun cleanKey(key: String): String = key.filterNot { it.isWhitespace() }
+
     /** Try an address and key without saving them. */
     fun testConnection(address: String, key: String) {
         val checked = ServerAddress.check(address)
@@ -91,7 +94,7 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val url = (checked as ServerAddress.Check.Ok).url
-        val useKey = key.ifBlank { accessKey }
+        val useKey = cleanKey(key).ifBlank { accessKey }
         _test.value = ConnectionTest(running = true, message = "Testing…")
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -118,9 +121,10 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
         if (checked is ServerAddress.Check.Bad) return checked.reason
         val url = (checked as ServerAddress.Check.Ok).url
         storage.serverAddress = url
-        if (key.isNotBlank()) {
-            storage.accessKey = key.trim()
-            accessKey = key.trim()
+        val cleaned = cleanKey(key)
+        if (cleaned.isNotBlank()) {
+            storage.accessKey = cleaned
+            accessKey = cleaned
         }
         log("settings saved (${if (checked.cleartext) "http" else "https"})")
         controller.configure(url) { accessKey }
