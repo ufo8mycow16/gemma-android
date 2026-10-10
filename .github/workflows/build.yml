@@ -1,22 +1,62 @@
 name: Build Gemma APK
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
       - name: Client logic tests
-        run: ./gradlew :core:test --no-daemon
+        run: ./gradlew :core:test --no-daemon 2>&1 | tee test.log
       - name: Build APK
-        run: ./gradlew :app:assembleDebug --no-daemon
+        run: ./gradlew :app:assembleDebug --no-daemon 2>&1 | tee build.log
+      - name: Inspect the APK
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          {
+            echo "Build ${GITHUB_SHA::7} on $(date -u +'%Y-%m-%d %H:%M UTC')"
+            echo
+            echo '```'
+            "$AAPT" dump badging "$APK" | grep -E "^package:|^sdkVersion|^targetSdkVersion|^uses-permission|^application-label:|^launchable-activity" | sed "s/ platformBuildVersionName.*//"
+            echo "size: $(stat -c %s "$APK") bytes"
+            echo "sha256: $(sha256sum "$APK" | cut -d' ' -f1)"
+            echo "client logic: $(grep -o 'core checks passed: [0-9]*' test.log | head -1)"
+            echo "compiler warnings: $(grep -c '^w: ' build.log || true)"
+            grep '^w: ' build.log | sed 's#.*/app/src/main/java/##' | head -15 || true
+            echo '```'
+          } > notes.md
+          cat notes.md
+          cp "$APK" gemma.apk
+      - name: Publish the APK as the latest release
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest gemma.apk --title "Gemma for Android (latest build)" --notes-file notes.md
       - uses: actions/upload-artifact@v4
         with:
           name: gemma-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: gemma.apk
+      - name: Report a failed build
+        if: failure()
+        run: |
+          {
+            echo "Build ${GITHUB_SHA::7} failed."
+            echo '```'
+            cat test.log build.log 2>/dev/null | grep -E "^e: |error:|FAILED|AssertionError|What went wrong|^> |Could not|Unresolved" | head -80
+            echo '--- last lines ---'
+            cat test.log build.log 2>/dev/null | tail -40
+            echo '```'
+          } > failure.md
+          gh issue create --title "Build failed: ${GITHUB_SHA::7}" --body-file failure.md
