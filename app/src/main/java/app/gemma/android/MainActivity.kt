@@ -29,10 +29,8 @@ class MainActivity : ComponentActivity() {
                 var showSettings by rememberSaveable { mutableStateOf(!viewModel.isConfigured) }
                 val listenNonce by viewModel.listenNonce.collectAsState()
                 val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-                    if (result.resultCode == Activity.RESULT_OK) {
-                        val text = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull().orEmpty()
-                        viewModel.onSpeechRecognized(text)
-                    }
+                    if (result.resultCode == Activity.RESULT_OK) viewModel.onSpeechRecognized(result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull().orEmpty())
+                    else if (viewModel.liveMode.value) viewModel.setLiveMode(false)
                 }
                 val requestSpeech = {
                     val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -45,18 +43,11 @@ class MainActivity : ComponentActivity() {
                 }
                 LaunchedEffect(listenNonce) { if (listenNonce > 0 && !showSettings) requestSpeech() }
                 LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onForeground() }
-                if (showSettings) {
-                    BackHandler(enabled = viewModel.isConfigured) { showSettings = false }
-                    SettingsScreen(viewModel, onDone = { showSettings = false })
-                } else ChatScreen(viewModel, onOpenSettings = { showSettings = true }, onRequestSpeech = requestSpeech)
+                if (showSettings) { BackHandler(enabled=viewModel.isConfigured){showSettings=false}; SettingsScreen(viewModel,onDone={showSettings=false}) }
+                else FinalScreen(viewModel,onOpenSettings={showSettings=true},onRequestSpeech=requestSpeech)
             }
         }
     }
 }
-
-private val GemmaColors = darkColorScheme(
-    primary = Color(0xFF65D9FF), onPrimary = Color(0xFF001E2B), primaryContainer = Color(0xFF173C58), onPrimaryContainer = Color(0xFFD7F3FF),
-    secondary = Color(0xFF9E91FF), background = Color(0xFF030711), surface = Color(0xFF07101C), surfaceVariant = Color(0xFF111C2C),
-    onBackground = Color(0xFFF2F6FC), onSurface = Color(0xFFF2F6FC), onSurfaceVariant = Color(0xFFB7C7DA), error = Color(0xFFFF8C9A),
-)
-@Composable fun GemmaTheme(content: @Composable () -> Unit) = MaterialTheme(colorScheme = GemmaColors, content = content)
+private val GemmaColors=darkColorScheme(primary=Color(0xFF65D9FF),onPrimary=Color(0xFF001E2B),primaryContainer=Color(0xFF173C58),onPrimaryContainer=Color(0xFFD7F3FF),secondary=Color(0xFF9E91FF),background=Color(0xFF030711),surface=Color(0xFF07101C),surfaceVariant=Color(0xFF111C2C),onBackground=Color(0xFFF2F6FC),onSurface=Color(0xFFF2F6FC),onSurfaceVariant=Color(0xFFB7C7DA),error=Color(0xFFFF8C9A))
+@Composable fun GemmaTheme(content:@Composable()->Unit)=MaterialTheme(colorScheme=GemmaColors,content=content)
