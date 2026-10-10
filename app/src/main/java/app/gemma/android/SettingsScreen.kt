@@ -32,6 +32,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -75,7 +76,7 @@ fun SettingsScreen(viewModel: GemmaViewModel, onDone: () -> Unit) {
                 placeholder = { Text("http://192.168.1.20:7860") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag("address"),
             )
             if (address.trim().startsWith("http://")) {
                 Text(
@@ -92,7 +93,7 @@ fun SettingsScreen(viewModel: GemmaViewModel, onDone: () -> Unit) {
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag("key"),
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
