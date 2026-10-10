@@ -19,6 +19,7 @@ import java.util.Locale
 
 data class ConnectionTest(val running: Boolean = false, val ok: Boolean = false, val message: String = "")
 data class SpeechItem(val turnId: String, val seq: Int, val url: String)
+private data class PreparedSpeech(val item: SpeechItem, val player: MediaPlayer, var prepared: Boolean = false)
 
 class GemmaViewModel(app: Application) : AndroidViewModel(app) {
     private val storage = Storage(app)
@@ -32,7 +33,7 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
     private val _liveMode = MutableStateFlow(false); val liveMode: StateFlow<Boolean> = _liveMode
     private val _listenNonce = MutableStateFlow(0L); val listenNonce: StateFlow<Long> = _listenNonce
     private val _speaking = MutableStateFlow(false); val speaking: StateFlow<Boolean> = _speaking
-    private val speechQueue = ArrayDeque<SpeechItem>()
+    private val speechQueue = ArrayDeque<PreparedSpeech>()
     private var player: MediaPlayer? = null
     private var serverSpeechFinished = false
 
@@ -59,38 +60,85 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
     fun setVoiceEnabled(on:Boolean){storage.voiceEnabled=on;_voiceEnabled.value=on;if(!on)stopAudio()}
 
     private fun onTurnEvent(turn:String,event:TurnEvent){ when(event){
-        is TurnEvent.Started -> synchronized(speechQueue){speechQueue.clear();serverSpeechFinished=false}
-        is TurnEvent.Speech -> if(_voiceEnabled.value){ log("voice ${event.seq} received: ${event.url.take(80)}"); enqueueSpeech(SpeechItem(turn,event.seq,absoluteSpeechUrl(event.url))) }
+        is TurnEvent.Started -> viewModelScope.launch(Dispatchers.Main) { clearPreparedQueue(); serverSpeechFinished=false }
+        is TurnEvent.Speech -> if(_voiceEnabled.value){ log("voice ${event.seq} received: ${event.url.take(80)}"); prefetchSpeech(SpeechItem(turn,event.seq,absoluteSpeechUrl(event.url))) }
         is TurnEvent.SpeechError -> log("Vision voice error: ${event.message}")
-        TurnEvent.Reset -> { synchronized(speechQueue){speechQueue.clear()}; stopPlayerOnly() }
-        is TurnEvent.SpeechDone -> {serverSpeechFinished=true;if(event.cancelled)stopAudio() else maybeFinishSpeaking()}
+        TurnEvent.Reset -> viewModelScope.launch(Dispatchers.Main) { clearPreparedQueue(); stopPlayerOnly() }
+        is TurnEvent.SpeechDone -> {serverSpeechFinished=true;if(event.cancelled)stopAudio() else viewModelScope.launch(Dispatchers.Main){ maybeFinishSpeaking() }}
         is TurnEvent.Failed -> {serverSpeechFinished=true;stopAudio()}
         else -> Unit
     }}
     private fun absoluteSpeechUrl(url:String)=if(url.startsWith("http://")||url.startsWith("https://"))url else storage.serverAddress.trimEnd('/')+"/"+url.trimStart('/')
-    private fun enqueueSpeech(item:SpeechItem){synchronized(speechQueue){speechQueue.addLast(item)};viewModelScope.launch(Dispatchers.Main){playNextIfIdle()}}
 
-    private fun playNextIfIdle(){
-        if(player!=null)return
-        val next=synchronized(speechQueue){if(speechQueue.isEmpty())null else speechQueue.removeFirst()}
-        if(next==null){maybeFinishSpeaking();return}
-        try{
-            val headers=if(accessKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer $accessKey")
-            _speaking.value=true
-            log("voice ${next.seq}: fetching authenticated audio")
-            player=MediaPlayer().apply{
-                setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                setDataSource(getApplication(), android.net.Uri.parse(next.url), headers)
-                setOnPreparedListener{it.start();log("voice ${next.seq}: playing")}
-                setOnCompletionListener{p->p.release();if(player===p)player=null;playNextIfIdle()}
-                setOnErrorListener{p,what,extra->p.release();if(player===p)player=null;log("voice ${next.seq}: MediaPlayer error $what/$extra at ${next.url.take(80)}");playNextIfIdle();true}
-                prepareAsync()
+    /**
+     * Prepare every speech chunk as soon as Vision announces it. MediaPlayer preparation includes
+     * the authenticated HTTP fetch, so while chunk N is playing chunks N+1/N+2 are already being
+     * downloaded/buffered. Playback remains strictly ordered by seq, but no longer waits to begin
+     * fetching the next chunk after the previous chunk finishes.
+     */
+    private fun prefetchSpeech(item: SpeechItem) = viewModelScope.launch(Dispatchers.Main) {
+        try {
+            val headers = if(accessKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer $accessKey")
+            val mp = MediaPlayer()
+            val entry = PreparedSpeech(item, mp)
+            speechQueue.addLast(entry)
+            _speaking.value = true
+            log("voice ${item.seq}: prefetching authenticated audio")
+            mp.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            mp.setDataSource(getApplication(), android.net.Uri.parse(item.url), headers)
+            mp.setOnPreparedListener {
+                entry.prepared = true
+                log("voice ${item.seq}: buffered and ready")
+                startPreparedHeadIfIdle()
             }
-        }catch(e:Exception){player=null;_speaking.value=false;log("voice ${next.seq}: ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}");playNextIfIdle()}
+            mp.setOnErrorListener { p, what, extra ->
+                val wasCurrent = player === p
+                if (wasCurrent) player = null
+                speechQueue.remove(entry)
+                p.release()
+                log("voice ${item.seq}: MediaPlayer error $what/$extra at ${item.url.take(80)}")
+                startPreparedHeadIfIdle()
+                maybeFinishSpeaking()
+                true
+            }
+            mp.prepareAsync()
+            startPreparedHeadIfIdle()
+        } catch(e:Exception) {
+            log("voice ${item.seq}: ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}")
+            startPreparedHeadIfIdle()
+            maybeFinishSpeaking()
+        }
     }
-    private fun maybeFinishSpeaking(){val empty=synchronized(speechQueue){speechQueue.isEmpty()};if(serverSpeechFinished&&empty&&player==null){_speaking.value=false;if(_liveMode.value)requestListening()}}
+
+    private fun startPreparedHeadIfIdle() {
+        if (player != null) return
+        val head = speechQueue.firstOrNull() ?: run { maybeFinishSpeaking(); return }
+        if (!head.prepared) return
+        speechQueue.removeFirst()
+        player = head.player
+        head.player.setOnCompletionListener { p ->
+            p.release()
+            if (player === p) player = null
+            log("voice ${head.item.seq}: complete; advancing buffered queue")
+            startPreparedHeadIfIdle()
+        }
+        try {
+            head.player.start()
+            log("voice ${head.item.seq}: playing (prefetched)")
+        } catch(e:Exception) {
+            head.player.release()
+            if(player === head.player) player=null
+            log("voice ${head.item.seq}: start failed: ${e.message.orEmpty().take(120)}")
+            startPreparedHeadIfIdle()
+        }
+    }
+
+    private fun clearPreparedQueue() {
+        while(speechQueue.isNotEmpty()) speechQueue.removeFirst().player.release()
+    }
+    private fun maybeFinishSpeaking(){if(serverSpeechFinished&&speechQueue.isEmpty()&&player==null){_speaking.value=false;if(_liveMode.value)requestListening()}}
     private fun stopPlayerOnly(){player?.runCatching{stop()};player?.release();player=null;_speaking.value=false}
-    private fun stopAudio(){synchronized(speechQueue){speechQueue.clear()};stopPlayerOnly();serverSpeechFinished=true}
+    private fun stopAudio(){viewModelScope.launch(Dispatchers.Main){clearPreparedQueue();stopPlayerOnly();serverSpeechFinished=true}}
 
     private fun cleanKey(key:String)=key.filterNot{it.isWhitespace()}
     fun testConnection(address:String,key:String){val checked=ServerAddress.check(address);if(checked is ServerAddress.Check.Bad){_test.value=ConnectionTest(message=checked.reason);return};val url=(checked as ServerAddress.Check.Ok).url;val useKey=cleanKey(key).ifBlank{accessKey};_test.value=ConnectionTest(running=true,message="Testing…");viewModelScope.launch{val result=withContext(Dispatchers.IO){try{val api=GemmaApi(url,{useKey});api.health();val status=api.status();ConnectionTest(ok=true,message="Connected to Gemma on Vision. "+(if(status.modelReady)"Model ready. "else"Model unavailable. ")+(if(status.voiceReady)"Voice ready."else"Voice not running."))}catch(f:GemmaFailure){log("connection test failed: ${f.javaClass.simpleName}");ConnectionTest(message=f.userMessage())}};_test.value=result}}

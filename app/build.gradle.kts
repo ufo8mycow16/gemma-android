@@ -5,7 +5,7 @@ plugins {
 }
 android {
     namespace = "app.gemma.android"; compileSdk = 35
-    defaultConfig { applicationId = "app.gemma.android"; minSdk = 26; targetSdk = 35; versionCode = 4; versionName = "0.4-audio-ui-fix"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
+    defaultConfig { applicationId = "app.gemma.android"; minSdk = 26; targetSdk = 35; versionCode = 5; versionName = "0.5-voice-prefetch"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("debug") } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }; buildFeatures { compose = true }
