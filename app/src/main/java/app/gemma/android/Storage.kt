@@ -10,11 +10,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * What the phone keeps: where Vision is, the access key, and nothing of Gemma's.
- * The access key is encrypted with a key held in the Android Keystore, so it is
- * not readable from the app's files and is never written in plain text.
- */
+/** Phone-only preferences. Gemma's conversations and memory remain authoritative on Vision. */
 class Storage(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("gemma", Context.MODE_PRIVATE)
 
@@ -25,6 +21,10 @@ class Storage(context: Context) {
     var developerMode: Boolean
         get() = prefs.getBoolean("developer_mode", false)
         set(value) = prefs.edit().putBoolean("developer_mode", value).apply()
+
+    var voiceEnabled: Boolean
+        get() = prefs.getBoolean("voice_enabled", true)
+        set(value) = prefs.edit().putBoolean("voice_enabled", value).apply()
 
     var accessKey: String
         get() = decrypt(prefs.getString("access_key_enc", null)) ?: ""
@@ -52,9 +52,7 @@ class Storage(context: Context) {
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val sealed = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
         Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + ":" + Base64.encodeToString(sealed, Base64.NO_WRAP)
-    } catch (e: Exception) {
-        null
-    }
+    } catch (e: Exception) { null }
 
     private fun decrypt(stored: String?): String? {
         if (stored.isNullOrEmpty()) return null
@@ -63,12 +61,8 @@ class Storage(context: Context) {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
             String(cipher.doFinal(Base64.decode(sealed, Base64.NO_WRAP)), Charsets.UTF_8)
-        } catch (e: Exception) {
-            null     // the key was lost (for example after a restore): ask for the access key again
-        }
+        } catch (e: Exception) { null }
     }
 
-    private companion object {
-        const val ALIAS = "gemma_access_key"
-    }
+    private companion object { const val ALIAS = "gemma_access_key" }
 }
