@@ -13,11 +13,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
+import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 
-/** What the settings screen shows after Test connection. */
 data class ConnectionTest(val running: Boolean = false, val ok: Boolean = false, val message: String = "")
+
+data class SpeechItem(val turnId: String, val seq: Int, val url: String)
 
 class GemmaViewModel(app: Application) : AndroidViewModel(app) {
     private val storage = Storage(app)
@@ -29,8 +31,14 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _voiceEnabled = MutableStateFlow(storage.voiceEnabled)
     val voiceEnabled: StateFlow<Boolean> = _voiceEnabled
+    private val _liveMode = MutableStateFlow(false)
+    val liveMode: StateFlow<Boolean> = _liveMode
+    private val _listenNonce = MutableStateFlow(0L)
+    val listenNonce: StateFlow<Long> = _listenNonce
+    private val speechQueue = ArrayDeque<SpeechItem>()
     private var player: MediaPlayer? = null
-    private val speech = SpeechQueue { turn, seq, url -> playSpeech(turn, seq, url) }
+    private var serverSpeechFinished = false
+    private var activeSpeechTurn: String? = null
 
     private val controller = ChatController(
         viewModelScope,
@@ -52,8 +60,16 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
 
     init { controller.configure(storage.serverAddress.ifBlank { null }) { accessKey }; if (isConfigured) controller.connect() }
     fun onDraftChange(text: String) { _draft.value = text }
-    fun send() { val text = _draft.value; val accepted = controller.send(text) { if (_draft.value.isBlank()) _draft.value = it }; if (accepted) _draft.value = "" }
-    fun stop() { stopAudio(); controller.stop() }
+    fun send() { sendText(_draft.value) }
+    fun sendText(raw: String) {
+        val text = raw.trim(); if (text.isBlank()) return
+        val accepted = controller.send(text) { if (_draft.value.isBlank()) _draft.value = it }
+        if (accepted) _draft.value = ""
+    }
+    fun onSpeechRecognized(text: String) { if (text.isNotBlank()) sendText(text) else if (_liveMode.value) requestListening() }
+    fun requestListening() { if (!chat.value.busy) _listenNonce.value = _listenNonce.value + 1 }
+    fun setLiveMode(on: Boolean) { _liveMode.value = on; if (on) { setVoiceEnabled(true); requestListening() } else stopAudio() }
+    fun stop() { _liveMode.value = false; stopAudio(); controller.stop() }
     fun loadOlder() = controller.loadOlder()
     fun onForeground() = controller.onForeground()
     fun dismissNotice() = controller.dismissNotice()
@@ -62,56 +78,59 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onTurnEvent(turn: String, event: TurnEvent) {
         when (event) {
-            is TurnEvent.Started -> if (_voiceEnabled.value) speech.begin(turn)
-            is TurnEvent.Speech -> if (_voiceEnabled.value) speech.offer(turn, event.seq, absoluteSpeechUrl(event.url))
-            TurnEvent.Reset -> speech.reset(turn)
-            is TurnEvent.SpeechDone -> if (event.cancelled) { speech.stop(turn); stopAudio() }
-            is TurnEvent.Failed -> { speech.stop(turn); stopAudio() }
+            is TurnEvent.Started -> synchronized(speechQueue) { speechQueue.clear(); activeSpeechTurn = turn; serverSpeechFinished = false }
+            is TurnEvent.Speech -> if (_voiceEnabled.value) enqueueSpeech(SpeechItem(turn, event.seq, absoluteSpeechUrl(event.url)))
+            TurnEvent.Reset -> synchronized(speechQueue) { speechQueue.clear(); stopAudio() }
+            is TurnEvent.SpeechDone -> { serverSpeechFinished = true; if (event.cancelled) stopAudio() else maybeFinishSpeaking() }
+            is TurnEvent.Failed -> { serverSpeechFinished = true; stopAudio() }
             else -> Unit
         }
     }
 
-    private fun absoluteSpeechUrl(url: String): String {
-        if (url.startsWith("http://") || url.startsWith("https://")) return url
-        return storage.serverAddress.trimEnd('/') + "/" + url.trimStart('/')
+    private fun absoluteSpeechUrl(url: String): String = if (url.startsWith("http://") || url.startsWith("https://")) url else storage.serverAddress.trimEnd('/') + "/" + url.trimStart('/')
+
+    private fun enqueueSpeech(item: SpeechItem) {
+        synchronized(speechQueue) { speechQueue.addLast(item) }
+        viewModelScope.launch(Dispatchers.Main) { playNextIfIdle() }
     }
 
-    private fun playSpeech(turn: String, seq: Int, url: String) {
-        viewModelScope.launch(Dispatchers.Main) {
-            try {
-                player?.release()
-                player = MediaPlayer().apply {
-                    setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                    setDataSource(url)
-                    setOnPreparedListener { it.start(); log("voice $turn/$seq playing") }
-                    setOnCompletionListener { p -> p.release(); if (player === p) player = null }
-                    setOnErrorListener { p, _, _ -> p.release(); if (player === p) player = null; log("voice $turn/$seq failed"); true }
-                    prepareAsync()
-                }
-            } catch (e: Exception) { log("voice $turn/$seq failed: ${e.javaClass.simpleName}") }
-        }
+    private fun playNextIfIdle() {
+        if (player != null) return
+        val next = synchronized(speechQueue) { if (speechQueue.isEmpty()) null else speechQueue.removeFirst() }
+        if (next == null) { maybeFinishSpeaking(); return }
+        try {
+            player = MediaPlayer().apply {
+                setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                setDataSource(next.url)
+                setOnPreparedListener { it.start(); log("voice ${next.turnId}/${next.seq} playing") }
+                setOnCompletionListener { p -> p.release(); if (player === p) player = null; playNextIfIdle() }
+                setOnErrorListener { p, _, _ -> p.release(); if (player === p) player = null; log("voice ${next.turnId}/${next.seq} failed"); playNextIfIdle(); true }
+                prepareAsync()
+            }
+        } catch (e: Exception) { player = null; log("voice failed: ${e.javaClass.simpleName}"); playNextIfIdle() }
     }
 
-    private fun stopAudio() { player?.runCatching { stop() }; player?.release(); player = null }
+    private fun maybeFinishSpeaking() {
+        val empty = synchronized(speechQueue) { speechQueue.isEmpty() }
+        if (serverSpeechFinished && empty && player == null && _liveMode.value) requestListening()
+    }
+
+    private fun stopAudio() {
+        synchronized(speechQueue) { speechQueue.clear() }
+        player?.runCatching { stop() }; player?.release(); player = null; serverSpeechFinished = true
+    }
+
     private fun cleanKey(key: String): String = key.filterNot { it.isWhitespace() }
-
     fun testConnection(address: String, key: String) {
         val checked = ServerAddress.check(address); if (checked is ServerAddress.Check.Bad) { _test.value = ConnectionTest(message = checked.reason); return }
         val url = (checked as ServerAddress.Check.Ok).url; val useKey = cleanKey(key).ifBlank { accessKey }; _test.value = ConnectionTest(running = true, message = "Testing…")
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try { val api = GemmaApi(url, { useKey }); api.health(); val status = api.status(); ConnectionTest(ok = true, message = "Connected to Gemma on Vision. " + (if (status.modelReady) "Model ready. " else "Model unavailable. ") + if (status.voiceReady) "Voice ready." else "Voice not running.") }
-                catch (f: GemmaFailure) { log("connection test failed: ${f.javaClass.simpleName}"); ConnectionTest(message = f.userMessage()) }
-            }; _test.value = result
-        }
+        viewModelScope.launch { val result = withContext(Dispatchers.IO) { try { val api = GemmaApi(url, { useKey }); api.health(); val status = api.status(); ConnectionTest(ok = true, message = "Connected to Gemma on Vision. " + (if (status.modelReady) "Model ready. " else "Model unavailable. ") + if (status.voiceReady) "Voice ready." else "Voice not running.") } catch (f: GemmaFailure) { log("connection test failed: ${f.javaClass.simpleName}"); ConnectionTest(message = f.userMessage()) } }; _test.value = result }
     }
-
     fun saveSettings(address: String, key: String): String? {
         val checked = ServerAddress.check(address); if (checked is ServerAddress.Check.Bad) return checked.reason
         val url = (checked as ServerAddress.Check.Ok).url; storage.serverAddress = url; val cleaned = cleanKey(key)
         if (cleaned.isNotBlank()) { storage.accessKey = cleaned; accessKey = cleaned }
         log("settings saved (${if (checked.cleartext) "http" else "https"})"); controller.configure(url) { accessKey }; controller.connect(); return null
     }
-
     override fun onCleared() { stopAudio(); super.onCleared() }
 }

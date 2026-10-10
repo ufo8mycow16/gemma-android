@@ -1,32 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!--
-      usesCleartextTraffic: during development Vision is reached over the home
-      network by plain http at an address typed in Settings, which cannot be
-      listed here in advance. The app shows a notice whenever the address is
-      http. Once Vision is reached over https (for example through Tailscale)
-      this can be set to false with no other change.
-      allowBackup is off so the stored access key never leaves the phone in a backup.
-    -->
-    <application
-        android:allowBackup="false"
-        android:icon="@drawable/ic_launcher"
-        android:label="Gemma"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.Gemma"
-        android:usesCleartextTraffic="true">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:windowSoftInputMode="adjustResize">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <application android:allowBackup="false" android:icon="@drawable/ic_launcher" android:label="Gemma" android:supportsRtl="true" android:theme="@style/Theme.Gemma" android:usesCleartextTraffic="true">
+        <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+            <intent-filter><action android:name="android.intent.action.SEND"/><category android:name="android.intent.category.DEFAULT"/><data android:mimeType="text/plain"/></intent-filter>
         </activity>
     </application>
 </manifest>
