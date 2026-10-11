@@ -55,7 +55,9 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
         if (isConfigured) { controller.connect(); refreshConversations() }
     }
 
-    private fun api(): GemmaApi? = storage.serverAddress.takeIf { it.isNotBlank() }?.let { GemmaApi(it) { accessKey } }
+    private fun api(): GemmaApi? = storage.serverAddress.takeIf { it.isNotBlank() }?.let {
+        GemmaApi(baseUrl = it, token = { accessKey })
+    }
 
     fun onDraftChange(text: String) { _draft.value = text }
     fun send() = sendText(_draft.value)
@@ -146,7 +148,7 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result=withContext(Dispatchers.IO){
                 try {
-                    val testApi=GemmaApi(url,{useKey}); testApi.health(); val status=testApi.status()
+                    val testApi=GemmaApi(baseUrl = url, token = { useKey }); testApi.health(); val status=testApi.status()
                     storage.serverAddress=url
                     if(useKey.isNotBlank()){ storage.accessKey=useKey; accessKey=useKey }
                     controller.configure(url){accessKey}; controller.connect().join(); _conversations.value=testApi.conversations()
