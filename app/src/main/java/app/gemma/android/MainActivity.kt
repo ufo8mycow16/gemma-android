@@ -1,7 +1,9 @@
 package app.gemma.android
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
@@ -21,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import java.util.Locale
@@ -35,7 +38,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent); setIntent(intent); acceptShare(intent)
+        super.onNewIntent(intent)
+        setIntent(intent)
+        acceptShare(intent)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,10 +51,13 @@ class MainActivity : ComponentActivity() {
             GemmaTheme {
                 var showSettings by rememberSaveable { mutableStateOf(!viewModel.isConfigured) }
                 val listenNonce by viewModel.listenNonce.collectAsState()
+
                 val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
                     if (result.resultCode == Activity.RESULT_OK) {
                         viewModel.onSpeechRecognized(result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull().orEmpty())
-                    } else if (viewModel.liveMode.value) viewModel.setLiveMode(false)
+                    } else if (viewModel.liveMode.value) {
+                        viewModel.setLiveMode(false)
+                    }
                 }
                 val requestSpeech: () -> Unit = {
                     val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -60,8 +68,30 @@ class MainActivity : ComponentActivity() {
                     }
                     runCatching { speechLauncher.launch(speechIntent) }
                 }
-                LaunchedEffect(listenNonce) { if (listenNonce > 0 && !showSettings) requestSpeech() }
+
+                val locationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { permissions ->
+                    val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                        permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+                    viewModel.onLocationPermissionChanged(granted)
+                }
+
+                LaunchedEffect(Unit) {
+                    val fine = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    val coarse = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    if (fine || coarse) {
+                        viewModel.onLocationPermissionChanged(true)
+                    } else {
+                        locationPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION))
+                    }
+                }
+
+                LaunchedEffect(listenNonce) {
+                    if (listenNonce > 0 && !showSettings) requestSpeech()
+                }
                 LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onForeground() }
+
                 if (showSettings) {
                     BackHandler(enabled = viewModel.isConfigured) { showSettings = false }
                     SettingsScreen(viewModel, onDone = { showSettings = false })

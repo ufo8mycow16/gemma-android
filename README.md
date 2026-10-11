@@ -40,3 +40,5 @@ to the primary conversation):
     python app.py --revoke-client phone     # if the phone is lost
 
 In the app: Settings > Gemma server address `http://<Vision's address>:7860`, paste the access key, Test connection, Save.
+
+<!-- Build trigger: corrected GemmaApi constructor -->
