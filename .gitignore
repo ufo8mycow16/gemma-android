@@ -6,3 +6,4 @@ local.properties
 .idea/
 *.iml
 __pycache__/
+server/BUILD_INFO.json
