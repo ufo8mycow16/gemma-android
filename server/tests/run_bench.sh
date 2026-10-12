@@ -6,7 +6,7 @@ set -u
 APP="$1"; LABEL="$2"; ROUNDS="${3:-2}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 LIVE="/tmp/gemma-bench-$LABEL"; rm -rf "$LIVE"; mkdir -p "$LIVE"
-cp "$APP" "$LIVE/app.py"; [ -d "$(dirname "$APP")/gemma_core" ] && cp -r "$(dirname "$APP")/gemma_core" "$LIVE/"; [ -d "$(dirname "$APP")/web" ] && cp -r "$(dirname "$APP")/web" "$LIVE/"
+cp "$APP" "$LIVE/app.py"; [ -d "$(dirname "$APP")/gemma_core" ] && cp -r "$(dirname "$APP")/gemma_core" "$LIVE/"; [ -d "$(dirname "$APP")/web" ] && cp -r "$(dirname "$APP")/web" "$LIVE/"; [ -d "$(dirname "$APP")/skills" ] && cp -r "$(dirname "$APP")/skills" "$LIVE/"
 for p in /tmp/gemma-bench-*.pids; do [ -f "$p" ] && kill $(cat "$p") 2>/dev/null; rm -f "$p"; done; sleep 0.5
 FAKE_SCALE=${FAKE_SCALE:-1.0} FAKE_LOG="$LIVE/fake.jsonl" python3 "$HERE/tests/fake_ollama.py" > "$LIVE/fake.out" 2>&1 & F=$!
 sleep 0.7

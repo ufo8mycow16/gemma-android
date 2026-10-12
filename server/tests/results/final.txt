@@ -1,0 +1,14 @@
+Final: this build (gemma-2.0.0), same stand-in model and cost model as baseline.txt
+(4 s per model reload, prompt read 9000 chars/s, 28 words/s), FAKE_SCALE=1.0, 3 rounds, fresh conversation each.
+
+scenario    first word (median)   whole reply (median)    baseline (v9) first word
+greeting                  0.40s                  0.40s                  9.25s
+casual                    0.43s                  0.43s                  9.26s
+question                  1.06s                  1.07s                  9.25s
+
+Model calls per turn: one context size everywhere (32768), so no reloads after the first load of the day.
+Greetings and small talk take the fast path (no planner, no provenance classifier, no document retrieval).
+The "question" scenario asks about Python, so the python-development skill (about 2.6k chars) is added to that
+turn's prompt; that is why it is slower than the earlier 0.76 s measurement taken before skills existed.
+Measured with the stand-in model: real numbers on Vision depend on the GPU, but the removed reloads
+(about 4 s each on a 12B model) are the dominant saving and do not depend on the stand-in.

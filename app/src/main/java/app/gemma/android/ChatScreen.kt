@@ -72,6 +72,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.ui.text.style.TextOverflow
 import gemma.core.ChatMessage
 import gemma.core.ChatState
@@ -112,9 +113,11 @@ fun ChatScreen(viewModel: GemmaViewModel) {
     // the arrow button appears instead (with a dot when something new has arrived below).
     var follow by remember { mutableStateOf(true) }
     var newBelow by remember { mutableStateOf(false) }
+    // Only Glen's own finger changes this (the list's own scrolling to follow new text does not).
+    val dragged by listState.interactionSource.collectIsDraggedAsState()
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (dragging, more) ->
-            if (dragging) follow = !more
+        snapshotFlow { dragged to listState.canScrollForward }.collect { (byHand, more) ->
+            if (byHand && more) follow = false
             if (!more) { follow = true; newBelow = false }
         }
     }

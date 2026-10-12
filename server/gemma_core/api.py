@@ -107,6 +107,8 @@ def register(app):
     def v1_artifact_upload():
         """Raw upload: body = file bytes, X-Filename header. For files Glen gives Gemma (code, ZIPs, any type)."""
         name = request.headers.get("X-Filename") or "upload"
+        if (request.content_length or 0) > artifacts.MAX_ARTIFACT_BYTES:
+            return _err("too large", "attachment_rejected", 413)      # refused before reading a byte of it
         data = request.get_data(cache=False)
         if not data:
             return _err("empty upload", "validation_error", 400)

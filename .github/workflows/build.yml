@@ -107,6 +107,11 @@ jobs:
         with:
           name: emulator-screenshots
           path: shots/
+      - name: Attach the screenshots to the development release
+        if: always() && github.ref_name != 'main'
+        run: |
+          ls shots/*/*.png shots/*.png 2>/dev/null | head -30
+          for f in $(ls shots/*/*.png shots/*.png 2>/dev/null); do gh release upload dev-latest "$f" --clobber || true; done
       - name: Record the result
         if: always()
         run: |

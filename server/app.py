@@ -5200,6 +5200,8 @@ def connect_google(open_browser=True, wait_seconds=600):
 
 
 WEB_DIR = APP_DIR / "web"
+# No request may be larger than the biggest upload plus room for base64 (Flask answers 413 without reading it).
+app.config["MAX_CONTENT_LENGTH"] = int(gartifacts.MAX_ARTIFACT_BYTES * 1.4) + (1 << 20)
 from gemma_core import diag_api, api as gapi  # noqa: E402
 diag_api.register(app)
 gapi.register(app)
