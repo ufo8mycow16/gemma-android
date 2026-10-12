@@ -158,6 +158,9 @@ class H(BaseHTTPRequestHandler):
                   "simulated_seconds": round(prompt_cost + gen_cost, 3), "user_tail": user[-160:]}
         with LOCK, open(LOG_PATH, "a") as f:
             f.write(json.dumps(record) + "\n")
+        if os.environ.get("FAKE_DUMP"):
+            with LOCK, open(os.environ["FAKE_DUMP"], "a") as f:
+                f.write(json.dumps({"purpose": purpose, "messages": payload.get("messages"), "tools": [t.get("function", {}).get("name") for t in payload.get("tools") or []]}) + "\n")
 
         time.sleep(prompt_cost * SCALE)
         if tool:

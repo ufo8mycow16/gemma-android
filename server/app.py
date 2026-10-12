@@ -22,7 +22,7 @@ from gemma_core import documents as gdocs
 
 APP_DIR = Path(__file__).resolve().parent
 DB = APP_DIR / "gemma.db"
-OLLAMA = "http://127.0.0.1:11434"
+OLLAMA = os.environ.get("GEMMA_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 # Gemma's conversational model. (The received v9 had a stray leading space here,
 # " gemma4:12b", which made the model-status check report the model as missing.)
 MODEL = os.environ.get("GEMMA_MODEL", "gemma4:12b").strip()
@@ -2491,27 +2491,39 @@ def semantic_scores(kind, query):
     return out
 
 
-def relevant_memories(query, limit=10):
-    """Memories most related to the query: by meaning when the embedding model
-    is available, with word overlap as a second signal and as the fallback."""
-    q = words(query)
+MEMORY_SEMANTIC_FLOOR = float(os.environ.get("GEMMA_MEMORY_FLOOR", "0.5"))
+_MEMORY_STOP = set("the a an and or of to in on at for with from by is are was were be it this that what which who how why "
+                   "when where do does did can could would should will i you me my your we our they he she his her them "
+                   "just so if not no yes ok okay hi hey hello morning evening night gemma glen please thanks".split())
+
+
+def relevant_memories(query, limit=6):
+    """Memories that are actually related to this message, and no others.
+
+    v9 gave every memory a positive score (any embedding similarity counted, and user/preference
+    memories got a flat bonus), so the top ten were included on every turn whatever was said:
+    that is how project memories followed Glen into unrelated chat. Now a memory needs real
+    word overlap or a meaning score above a floor, and close to the best match. Embedding new
+    memories happens after the reply (after_turn), not while Glen waits."""
+    q = {w for w in words(query) if w not in _MEMORY_STOP}
     with db() as con:
         rows = con.execute("SELECT * FROM memories WHERE active=1 ORDER BY updated_at DESC").fetchall()
     meaning = {}
-    if rows and EMBED_MODEL and time.time() >= _EMBED_STATE["down_until"]:
-        index_embeddings()                 # picks up memories saved since last time
+    if rows and EMBED_MODEL and time.time() >= _EMBED_STATE["down_until"] and q:
         meaning = semantic_scores("memory", query)
+    best = max(meaning.values(), default=0.0)
     scored = []
     for r in rows:
-        overlap = len(q & words(f"{r['subject']} {r['fact']}"))
-        bonus = 1 if r["kind"] in ("user", "preference") else 0
-        score = overlap * 3 + bonus + 12 * max(0.0, meaning.get(r["id"], 0.0))
-        if score:
-            scored.append((score, r))
-    if not scored:
-        scored = [(0, r) for r in rows[:6]]
+        overlap = len(q & {w for w in words(f"{r['subject']} {r['fact']}") if w not in _MEMORY_STOP})
+        sem = meaning.get(r["id"], 0.0)
+        semantic_ok = sem >= MEMORY_SEMANTIC_FLOOR and sem >= best - 0.12
+        if overlap or semantic_ok:
+            scored.append((overlap * 3 + 12 * max(0.0, sem), r))
     scored.sort(key=lambda x: (x[0], x[1]["confidence"]), reverse=True)
-    return [r for _, r in scored[:limit]]
+    chosen = [r for _, r in scored[:limit]]
+    observe.debug("CONTEXT", "memories selected", considered=len(rows), selected=[r["id"] for r in chosen],
+                  best_semantic=round(best, 3), query_words=len(q))
+    return chosen
 
 
 # ---- running summary of each conversation ------------------------------------
