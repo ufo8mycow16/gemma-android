@@ -6608,7 +6608,7 @@ def app_events_block(cid):
         last = con.execute("SELECT created_at FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
         since = last["created_at"] if last else ""
         finished = [dict(r) for r in con.execute(
-            "SELECT id, title, state, result, error FROM jobs WHERE conversation_id=? AND finished_at > ? AND state IN ('done','failed','cancelled') "
+            "SELECT id, title, state, result, error FROM jobs WHERE conversation_id=? AND finished_at >= ? AND state IN ('done','failed','cancelled') "
             "ORDER BY finished_at", (cid, since))]
     events = []
     for a in gapprovals.outcomes_since(cid, since):

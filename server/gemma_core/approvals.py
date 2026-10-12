@@ -112,6 +112,11 @@ def decide(aid: str, approve: bool, always: bool = False) -> dict:
     ctx = {"cid": r["conversation_id"], "request_id": r["request_id"], "user_message_id": None, "approved": True,
            "approval_id": aid}
     args = store.jload(r["arguments"], {})
+    # The action runs under the request that proposed it, so Diagnostics shows one connected story.
+    if r["request_id"]:
+        observe.request_id.set(r["request_id"])
+    if r["conversation_id"]:
+        observe.conversation_id.set(r["conversation_id"])
     result = tools.call(r["tool"], args, dict(ctx, request_id="approval:" + r["idempotency_key"]))
     state = "failed" if result.get("error") else "executed"
     with store.lock(), store.db() as con:
@@ -123,5 +128,5 @@ def outcomes_since(conversation_id: int, since_iso: str | None) -> list[dict]:
     """Decided approvals Gemma has not yet been told about (given to her on the next turn)."""
     with store.db() as con:
         rows = con.execute("SELECT * FROM approvals WHERE conversation_id=? AND state IN ('executed','failed','denied','expired') "
-                           "AND decided_at > ? ORDER BY decided_at", (conversation_id, since_iso or "")).fetchall()
+                           "AND decided_at >= ? ORDER BY decided_at", (conversation_id, since_iso or "")).fetchall()
     return [public(dict(r)) for r in rows]

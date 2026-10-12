@@ -129,6 +129,34 @@ class H(BaseHTTPRequestHandler):
         user = last_user(payload)
         for r in rules():
             if r.get("purpose", "chat") == purpose and r.get("match", "") in user:
+                if r.get("steps"):
+                    # Multi-step: the step is chosen by how many tool results follow Glen's last message.
+                    msgs = payload.get("messages") or []
+                    last_u = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=0)
+                    done_steps = sum(1 for m in msgs[last_u:] if m.get("role") == "tool")
+                    step = r["steps"][min(done_steps, len(r["steps"]) - 1)]
+                    blob = json.dumps(msgs)
+                    subs = {}
+                    import re as _re
+                    m_a = _re.findall(r'artifact_id[\\"=: ]+(a[0-9a-f]{15})', blob)
+                    m_w = _re.findall(r'\\"id\\": \\"(w[0-9a-f]{10})', blob)
+                    m_p = _re.findall(r'\\"approval_id\\": \\"(p[0-9a-f]{12})', blob)
+                    subs = {"{a}": m_a[0] if m_a else "", "{a_last}": m_a[-1] if m_a else "", "{w}": m_w[0] if m_w else "",
+                            "{p}": m_p[0] if m_p else ""}
+                    def sub(v):
+                        if isinstance(v, str):
+                            for k, val in subs.items():
+                                v = v.replace(k, val)
+                            return v
+                        if isinstance(v, dict):
+                            return {k: sub(x) for k, x in v.items()}
+                        if isinstance(v, list):
+                            return [sub(x) for x in v]
+                        return v
+                    if step.get("tool"):
+                        tool = sub(step["tool"])
+                    text = sub(step.get("reply"))
+                    break
                 if r.get("tool") and not has_tool_result(payload):
                     tool = r["tool"]
                 text = r.get("reply")

@@ -16,12 +16,16 @@ def free_port():
 
 
 class Live:
-    def __init__(self, env=None, rules=None, scale="0.02"):
+    def __init__(self, env=None, rules=None, scale="0.02", files=None):
         self.dir = Path(tempfile.mkdtemp(prefix="gemma-live-"))
         shutil.copy(SERVER / "app.py", self.dir / "app.py")
         for sub in ("gemma_core", "web", "plugins", "skills"):
             if (SERVER / sub).exists():
                 shutil.copytree(SERVER / sub, self.dir / sub, ignore=shutil.ignore_patterns("__pycache__"))
+        for rel, content in (files or {}).items():
+            target = self.dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content if isinstance(content, bytes) else content.encode())
         self.log, self.dump = self.dir / "fake.jsonl", self.dir / "dump.jsonl"
         self.rules = self.dir / "rules.json"
         self.rules.write_text(json.dumps(rules or []))
