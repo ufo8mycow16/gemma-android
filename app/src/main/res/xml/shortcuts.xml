@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="live"
+        android:enabled="true"
+        android:icon="@drawable/ic_stat_gemma"
+        android:shortcutShortLabel="@string/shortcut_talk"
+        android:shortcutLongLabel="@string/shortcut_talk_long">
+        <intent
+            android:action="app.gemma.android.LIVE"
+            android:targetPackage="app.gemma.android"
+            android:targetClass="app.gemma.android.MainActivity" />
+    </shortcut>
+</shortcuts>

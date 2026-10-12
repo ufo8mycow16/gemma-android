@@ -12,15 +12,25 @@ android {
         applicationId = "app.gemma.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1 (milestone 1)"
+        versionCode = 2
+        versionName = "0.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // One fixed signing key, kept with the project, so every build installs over the last one.
+    // This is a personal, sideloaded app: the key is not a secret worth more than the private repository it lives in.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("gemma-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Sideloaded personal build: signed with the debug key so it installs without a keystore to manage.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -50,6 +60,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Checking Vision for reminders while the app is closed.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 
     // Driving the real screens on an emulator.
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.10.01"))

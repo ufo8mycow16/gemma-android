@@ -15,7 +15,7 @@ import kotlinx.serialization.json.longOrNull
  * this is only how a client reads what it says.
  */
 
-const val SUPPORTED_API_VERSION = 1
+const val SUPPORTED_API_VERSION = 2
 
 data class Conversation(val id: Long, val title: String, val primary: Boolean)
 
@@ -36,6 +36,7 @@ data class HistoryPage(
     val messages: List<Message>,
     val hasMore: Boolean,
     val activeTurnId: String?,
+    val pendingCalendar: PendingCalendar? = null,
 )
 
 data class ServerStatus(
@@ -56,6 +57,7 @@ data class TurnResult(
     val researchLog: String?,
     val stopped: Boolean,
     val duplicate: Boolean,
+    val pendingCalendar: PendingCalendar? = null,
 )
 
 enum class TurnState { ACTIVE, DONE, STOPPED, FAILED, UNKNOWN }
@@ -106,7 +108,9 @@ fun GemmaFailure.userMessage(): String = when (this) {
         "validation_error" -> "Vision didn't accept that message."
         "attachment_rejected" -> "Vision didn't accept that attachment."
         "auth_required" -> "Vision needs a valid access key. Check it in Settings."
-        "voice_unavailable" -> "Gemma's voice isn't available right now."
+        "voice_unavailable" -> "Gemma's voice isn't running on Vision."
+        "stt_unavailable" -> "Transcription isn't installed on Vision yet."
+        "message_not_found" -> "That message is no longer on Vision."
         else -> "Something went wrong on Vision."
     }
 }
@@ -134,6 +138,7 @@ internal fun turnResult(o: JsonObject, fallbackTurnId: String): TurnResult = Tur
     researchLog = o.str("research_log"),
     stopped = o.bool("stopped") ?: false,
     duplicate = o.bool("duplicate") ?: false,
+    pendingCalendar = pendingCalendar(o),
 )
 
 object Events {
@@ -147,7 +152,7 @@ object Events {
             null
         } ?: return null
         return when (val type = o.str("type") ?: return null) {
-            "start" -> TurnEvent.Started(o.str("turn_id") ?: turnId, o.long("conversation_id") ?: -1, o.int("api_version") ?: 0)
+            "start" -> TurnEvent.Started(o.str("turn_id") ?: o.str("play_id") ?: turnId, o.long("conversation_id") ?: -1, o.int("api_version") ?: 0)
             "status" -> TurnEvent.Status(o.str("stage") ?: "", o.str("label") ?: "")
             "delta" -> TurnEvent.Delta(o.str("text") ?: "")
             "reset" -> TurnEvent.Reset

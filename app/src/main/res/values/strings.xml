@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_talk">Talk to Gemma</string>
+    <string name="shortcut_talk_long">Start a voice conversation</string>
+</resources>

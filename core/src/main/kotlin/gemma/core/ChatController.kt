@@ -33,6 +33,19 @@ class ChatController(
 
     @Volatile private var api: GemmaApi? = null
     @Volatile private var call: TurnCall? = null
+    @Volatile private var chosenConversation: Long? = null      // null = the server's main conversation
+    @Volatile private var chosenTitle: String = ""
+
+    /** The server this controller is pointed at, for the screens that are not the conversation. */
+    val server: GemmaApi? get() = api
+
+    /** Told about every speech event of this phone's own turns (and Reset / Done / Failed, so audio can follow the text). */
+    @Volatile var speechListener: ((turnId: String, event: TurnEvent) -> Unit)? = null
+    /** Asked at the moment of sending: should this reply be spoken, and how. */
+    @Volatile var wantsVoice: () -> Boolean = { false }
+    @Volatile var voiceStyle: () -> String = { "balanced" }
+    /** The phone's time zone and (if allowed) position, in the server's "client" format. */
+    @Volatile var clientInfo: () -> kotlinx.serialization.json.JsonObject? = { null }
 
     private fun dispatch(action: ChatAction) = _state.update { ChatReducer.reduce(it, action) }
 
@@ -51,6 +64,19 @@ class ChatController(
     }
 
     fun dismissNotice() = dispatch(ChatAction.NoticeDismissed)
+
+    /** Show another chat (null = the main one). Refused while Gemma is answering. */
+    fun openConversation(id: Long?, title: String = ""): Boolean {
+        if (state.value.busy) return false
+        if (id == state.value.conversationId && id != null) return true
+        chosenConversation = id
+        chosenTitle = title
+        dispatch(ChatAction.ConversationCleared)
+        connect()
+        return true
+    }
+
+    fun notice(text: String) = dispatch(ChatAction.LinkChanged(state.value.link, notice = text))
 
     private fun onFailure(f: GemmaFailure, what: String) {
         log("$what failed: ${f.javaClass.simpleName}" + if (f is GemmaFailure.Api) " ${f.code} ${f.httpStatus}" else "")
@@ -74,8 +100,16 @@ class ChatController(
             if (status.apiVersion > SUPPORTED_API_VERSION) {
                 dispatch(ChatAction.LinkChanged(Link.CONNECTED, notice = "Vision is running a newer version than this app expects."))
             }
-            val conversation = api.primaryConversation()
-            val page = api.messages(conversation.id, limit = 60)
+            var conversation = chosenConversation?.let { Conversation(it, chosenTitle, false) } ?: api.primaryConversation()
+            val page = try {
+                api.messages(conversation.id, limit = 60)
+            } catch (f: GemmaFailure.Api) {
+                // The chat that was open has been removed (perhaps from another device): fall back to the main one.
+                if (f.code != "conversation_not_found" || chosenConversation == null) throw f
+                chosenConversation = null
+                conversation = api.primaryConversation()
+                api.messages(conversation.id, limit = 60)
+            }
             dispatch(ChatAction.HistoryLoaded(conversation, page))
             log("connected: api v${status.apiVersion}, model ${if (status.modelReady) "ready" else "unavailable"}, " +
                 "voice ${if (status.voiceReady) "ready" else "unavailable"}, ${page.messages.size} messages")
@@ -115,24 +149,38 @@ class ChatController(
      * `onReturned` is called with the text if the server certainly never received it,
      * so the app can put it back in the input box.
      */
-    fun send(text: String, onReturned: (String) -> Unit = {}): Boolean {
+    fun send(text: String, images: List<String> = emptyList(), source: String = "text", onReturned: (String) -> Unit = {}): Boolean {
         val api = api ?: return false
         val s = state.value
         val conversationId = s.conversationId ?: return false
         val message = text.trim()
-        if (s.busy || message.isEmpty()) return false
+        if (s.busy || (message.isEmpty() && images.isEmpty())) return false
 
         val turnId = TurnIds.new()
         val thisCall = api.newCall(turnId)
         call = thisCall
-        dispatch(ChatAction.SendStarted(turnId, message))
+        dispatch(ChatAction.SendStarted(turnId, message, images.size))
         log("turn $turnId: sending (${message.length} chars)")
 
         scope.launch(io) {
             try {
-                val last = api.streamTurn(conversationId, thisCall, message) { event ->
+                val voice = wantsVoice()
+                val last = api.streamTurn(
+                    conversationId, thisCall, message, voice = voice, client = clientInfo(), images = images,
+                    voiceStyle = if (voice) voiceStyle() else null, source = source,
+                ) { event ->
                     if (event !is TurnEvent.Ping && event !is TurnEvent.Delta) log("turn $turnId: ${event.javaClass.simpleName}")
                     dispatch(ChatAction.Event(turnId, event))
+                    when (event) {
+                        is TurnEvent.Speech, is TurnEvent.SpeechError, is TurnEvent.SpeechDone,
+                        TurnEvent.Reset, is TurnEvent.Failed -> speechListener?.invoke(turnId, event)
+                        is TurnEvent.Done -> {
+                            speechListener?.invoke(turnId, event)
+                            // The text is finished and stored; her voice may still be arriving on this same stream.
+                            if (voice) scope.launch(io) { reloadHistory() }
+                        }
+                        else -> {}
+                    }
                 }
                 if (last is TurnEvent.Failed && last.failure.code == "model_unavailable") {
                     dispatch(ChatAction.LinkChanged(Link.CONNECTED))
@@ -141,6 +189,7 @@ class ChatController(
                 reloadHistory()      // swap the in-progress bubbles for the stored messages
             } catch (f: GemmaFailure.Interrupted) {
                 log("turn $turnId: connection dropped mid-turn (${f.detail})")
+                speechListener?.invoke(turnId, TurnEvent.SpeechDone(cancelled = true))
                 resolveLostTurn(api, turnId)
             } catch (f: GemmaFailure) {
                 // Nothing reached the server: give the text back rather than leave a message that was never sent.
@@ -192,6 +241,18 @@ class ChatController(
         }
         dispatch(ChatAction.TurnLost(turnId, "Sent, but the reply didn't arrive",
             "The connection dropped before Gemma's reply arrived. It will appear here once Vision is reachable, if she answered."))
+    }
+
+    /** Stop speech that is still being made for a turn whose text has already finished, or for a played message. */
+    fun stopSpeech(id: String) {
+        val api = api ?: return
+        scope.launch(io) {
+            try {
+                api.stopTurn(id)
+            } catch (f: GemmaFailure) {
+                log("speech $id: stop could not be delivered (${f.javaClass.simpleName})")
+            }
+        }
     }
 
     /** Test hook: behave as if the network dropped in the middle of the current turn. */

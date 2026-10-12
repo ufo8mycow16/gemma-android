@@ -5,33 +5,86 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.security.KeyStore
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+/** How the phone should behave. None of this changes Gemma herself. */
+data class Prefs(
+    /** Her voice is available at all (play buttons, spoken replies). */
+    val voiceOutput: Boolean = true,
+    /** Replies are spoken as they arrive, without pressing play. */
+    val autoPlay: Boolean = true,
+    /** "plain", "balanced" or "expressive": how much performance Vision adds to her delivery. */
+    val style: String = "balanced",
+    val speed: Float = 1.0f,
+    /** In live mode, talking over her stops her (used with earphones). */
+    val interrupt: Boolean = true,
+    val compact: Boolean = false,
+    val shareLocation: Boolean = false,
+    val notifications: Boolean = true,
+    val developer: Boolean = false,
+)
+
 /**
- * What the phone keeps: where Vision is, the access key, and nothing of Gemma's.
- * The access key is encrypted with a key held in the Android Keystore, so it is
- * not readable from the app's files and is never written in plain text.
+ * What the phone keeps: where Vision is, the access key, how the app should
+ * behave, and nothing of Gemma's. The access key is encrypted with a key held
+ * in the Android Keystore, so it is not readable from the app's files and is
+ * never written in plain text.
  */
 class Storage(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("gemma", Context.MODE_PRIVATE)
+    private val prefsFile = context.applicationContext.getSharedPreferences("gemma", Context.MODE_PRIVATE)
 
     var serverAddress: String
-        get() = prefs.getString("server_address", "") ?: ""
-        set(value) = prefs.edit().putString("server_address", value).apply()
-
-    var developerMode: Boolean
-        get() = prefs.getBoolean("developer_mode", false)
-        set(value) = prefs.edit().putBoolean("developer_mode", value).apply()
+        get() = prefsFile.getString("server_address", "") ?: ""
+        set(value) = prefsFile.edit().putString("server_address", value).apply()
 
     var accessKey: String
-        get() = decrypt(prefs.getString("access_key_enc", null)) ?: ""
+        get() = decrypt(prefsFile.getString("access_key_enc", null)) ?: ""
         set(value) {
-            val editor = prefs.edit()
+            val editor = prefsFile.edit()
             if (value.isBlank()) editor.remove("access_key_enc") else editor.putString("access_key_enc", encrypt(value))
             editor.apply()
+        }
+
+    var prefs: Prefs
+        get() = Prefs(
+            voiceOutput = prefsFile.getBoolean("voice_output", true),
+            autoPlay = prefsFile.getBoolean("auto_play", true),
+            style = prefsFile.getString("voice_style", "balanced") ?: "balanced",
+            speed = prefsFile.getFloat("voice_speed", 1.0f),
+            interrupt = prefsFile.getBoolean("interrupt", true),
+            compact = prefsFile.getBoolean("compact", false),
+            shareLocation = prefsFile.getBoolean("share_location", false),
+            notifications = prefsFile.getBoolean("notifications", true),
+            developer = prefsFile.getBoolean("developer_mode", false),
+        )
+        set(p) = prefsFile.edit()
+            .putBoolean("voice_output", p.voiceOutput).putBoolean("auto_play", p.autoPlay)
+            .putString("voice_style", p.style).putFloat("voice_speed", p.speed)
+            .putBoolean("interrupt", p.interrupt).putBoolean("compact", p.compact)
+            .putBoolean("share_location", p.shareLocation).putBoolean("notifications", p.notifications)
+            .putBoolean("developer_mode", p.developer).apply()
+
+    /** The newest notice from Gemma already shown on this phone. -1 = never asked yet. */
+    var lastNoticeId: Long
+        get() = prefsFile.getLong("last_notice_id", -1)
+        set(value) = prefsFile.edit().putLong("last_notice_id", value).apply()
+
+    var askedForNotifications: Boolean
+        get() = prefsFile.getBoolean("asked_notifications", false)
+        set(value) = prefsFile.edit().putBoolean("asked_notifications", value).apply()
+
+    /** A random name for this phone, so Vision can tell its devices apart. It identifies nothing else. */
+    val clientId: String
+        get() {
+            prefsFile.getString("client_id", null)?.let { return it }
+            val bytes = ByteArray(12).also { SecureRandom().nextBytes(it) }
+            val id = "android-" + bytes.joinToString("") { "%02x".format(it) }
+            prefsFile.edit().putString("client_id", id).apply()
+            return id
         }
 
     private fun secretKey(): SecretKey {

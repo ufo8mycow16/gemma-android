@@ -18,6 +18,13 @@ data class ChatMessage(
     val stopped: Boolean = false,
     /** Set when this message did not go through, with a sentence saying so. */
     val problem: String? = null,
+    /** The server's id, once the message is stored there. */
+    val id: Long? = null,
+    val createdAt: String = "",
+    /** Server paths of pictures stored with this message. */
+    val attachments: List<String> = emptyList(),
+    /** Pictures sent with a turn still in progress. */
+    val pendingImages: Int = 0,
 )
 
 data class ChatState(
@@ -34,6 +41,7 @@ data class ChatState(
     val stopping: Boolean = false,
     /** A short notice for the person, or null. */
     val notice: String? = null,
+    val pendingCalendar: PendingCalendar? = null,
 ) {
     val busy: Boolean get() = activeTurnId != null
 
@@ -53,7 +61,9 @@ sealed class ChatAction {
     data class StatusKnown(val status: ServerStatus) : ChatAction()
     data class HistoryLoaded(val conversation: Conversation, val page: HistoryPage) : ChatAction()
     data class OlderLoaded(val page: HistoryPage) : ChatAction()
-    data class SendStarted(val turnId: String, val text: String) : ChatAction()
+    data class SendStarted(val turnId: String, val text: String, val images: Int = 0) : ChatAction()
+    /** Another chat is about to be shown: clear this one off the screen. */
+    object ConversationCleared : ChatAction()
     data class Event(val turnId: String, val event: TurnEvent) : ChatAction()
     data class StopRequested(val turnId: String) : ChatAction()
     /** The turn ended on this phone without a result from the server. */
@@ -64,7 +74,10 @@ sealed class ChatAction {
 }
 
 object ChatReducer {
-    private fun Message.toChat() = ChatMessage(key = "m$id", role = role, text = text, researchLog = researchLog)
+    private fun Message.toChat() = ChatMessage(
+        key = "m$id", role = role, text = text, researchLog = researchLog,
+        id = id, createdAt = createdAt, attachments = attachments.map { it.url },
+    )
 
     fun reduce(s: ChatState, a: ChatAction): ChatState = when (a) {
         is ChatAction.LinkChanged -> s.copy(link = a.link, notice = a.notice ?: s.notice)
@@ -82,6 +95,7 @@ object ChatReducer {
                 conversationTitle = a.conversation.title,
                 messages = a.page.messages.map { it.toChat() } + mine,
                 hasOlder = a.page.hasMore,
+                pendingCalendar = if (s.activeTurnId == null) a.page.pendingCalendar else s.pendingCalendar,
                 activity = if (s.activeTurnId == null && remote != null) "Gemma is answering on another device" else s.activity,
             )
         }
@@ -96,8 +110,9 @@ object ChatReducer {
             stopping = false,
             activity = "Sending…",
             notice = null,
+            pendingCalendar = null,
             messages = s.messages +
-                ChatMessage("t${a.turnId}:u", "user", a.text) +
+                ChatMessage("t${a.turnId}:u", "user", a.text, pendingImages = a.images) +
                 ChatMessage("t${a.turnId}:a", "assistant", "", streaming = true),
         )
 
@@ -123,6 +138,11 @@ object ChatReducer {
         )
 
         ChatAction.NoticeDismissed -> s.copy(notice = null)
+
+        ChatAction.ConversationCleared -> if (s.busy) s else s.copy(
+            conversationId = null, conversationTitle = "", messages = emptyList(), hasOlder = false,
+            activity = "", pendingCalendar = null,
+        )
     }
 
     private fun onEvent(s: ChatState, turnId: String, e: TurnEvent): ChatState {
@@ -138,7 +158,7 @@ object ChatReducer {
                 // The server's final text is authoritative, whatever arrived piece by piece.
                 val finished = reply { it.copy(text = r.reply, researchLog = r.researchLog, streaming = false, stopped = r.stopped) }
                     .filterNot { it.key == key && it.text.isBlank() && !r.stopped }
-                s.copy(messages = finished, activeTurnId = null, stopping = false, activity = "")
+                s.copy(messages = finished, activeTurnId = null, stopping = false, activity = "", pendingCalendar = r.pendingCalendar)
             }
             is TurnEvent.Failed -> s.copy(
                 activeTurnId = null, stopping = false, activity = "", notice = e.failure.userMessage(),
@@ -150,7 +170,7 @@ object ChatReducer {
                     }
                 },
             )
-            // Speech belongs to the audio queue (milestone 2); it never changes the text.
+            // Speech belongs to the audio player; it never changes the text.
             is TurnEvent.Speech, is TurnEvent.SpeechError, is TurnEvent.SpeechDone -> s
             TurnEvent.Ping, is TurnEvent.Unknown -> s
         }
@@ -173,7 +193,7 @@ object TurnIds {
 }
 
 /**
- * Order and deduplication for speech pieces (used from milestone 2).
+ * Order and deduplication for speech pieces.
  * Pieces can arrive late, twice, or after Stop; only the right ones, in order, reach the player.
  */
 class SpeechQueue(private val play: (turnId: String, seq: Int, url: String) -> Unit) {

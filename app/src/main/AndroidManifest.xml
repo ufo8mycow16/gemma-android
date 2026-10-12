@@ -3,14 +3,39 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Talking to Gemma, and recording for transcription. Asked for only when first used. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Reminders and messages from Gemma. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Only used if "Share location with Gemma" is switched on in Settings. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Keeps a voice conversation going with the screen off. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+
+    <queries>
+        <!-- The phone's own speech recognition. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <!-- The camera app, for "Take a photo". -->
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
 
     <!--
-      usesCleartextTraffic: during development Vision is reached over the home
-      network by plain http at an address typed in Settings, which cannot be
-      listed here in advance. The app shows a notice whenever the address is
-      http. Once Vision is reached over https (for example through Tailscale)
-      this can be set to false with no other change.
-      allowBackup is off so the stored access key never leaves the phone in a backup.
+      usesCleartextTraffic: Vision is reached by plain http at an address typed
+      in Settings (the home network, or a private link such as Tailscale), which
+      cannot be listed here in advance. The app shows a notice whenever the
+      address is http. allowBackup is off so the stored access key never leaves
+      the phone in a backup.
     -->
     <application
         android:allowBackup="false"
@@ -22,11 +47,38 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- "Share" from other apps: text, links and pictures. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
+
+        <service
+            android:name=".VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback|microphone" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="app.gemma.android.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
