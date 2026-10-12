@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Gemma</title>
+<link rel="icon" href="/web/img/icon.png">
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div class="brand"><img src="/web/img/gemma_face.jpg" alt=""><div><b>GEMMA</b><small id="buildLine">personal assistant</small></div></div>
+    <div class="side-actions">
+      <button class="btn primary" id="newChat" style="flex:1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>New chat</button>
+      <button class="btn" id="newProject" title="New project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+    </div>
+    <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="searchBox" placeholder="Search everything" autocomplete="off"></div>
+    <div class="side-list scroll" id="chatList"></div>
+    <div class="side-foot">
+      <button data-panel="activity"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>Activity<span class="badge" id="actBadge" hidden></span></button>
+      <button data-panel="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>Files</button>
+      <button data-panel="memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a6 6 0 0 0-6 6c0 2.5 1.5 4 2.5 5S10 16 10 18h4c0-2 .5-3 1.5-4S18 11.5 18 9a6 6 0 0 0-6-6zM10 21h4"/></svg>Memory</button>
+      <button data-panel="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header id="top">
+      <button class="icon-btn" id="burger" title="Chats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+      <div class="title" id="chatTitle">Gemma</div>
+      <span class="chip proj" id="projChip" hidden></span>
+      <div id="status"><span class="dot" id="statusDot"></span><span id="statusText">Connecting…</span>
+        <a class="icon-btn" href="/diagnostics" target="gemma-diagnostics" title="Diagnostics (opens its own window)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M4 19h16M8 15l3-4 3 2 5-6"/></svg></a>
+      </div>
+    </header>
+    <div id="scroller" class="scroll"><div id="messages"></div></div>
+    <div id="composerWrap">
+      <button id="jump" title="Jump to latest"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+      <div id="composer">
+        <div id="chips"></div>
+        <div id="inputRow">
+          <button id="attach" title="Attach files, pictures, ZIPs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21 12-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.7 3.7 0 0 1 5.2 5.2L9.8 18a1.8 1.8 0 0 1-2.6-2.6l8.5-8.5"/></svg></button>
+          <textarea id="input" rows="1" placeholder="Message Gemma"></textarea>
+          <button id="mic" title="Dictate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+          <button id="send" title="Send" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 12 20 4l-6 16-2.5-6.5z"/></svg></button>
+        </div>
+      </div>
+      <div id="hint">Enter to send · Shift+Enter for a new line · drop files anywhere</div>
+    </div>
+    <div id="drop">Drop files for Gemma</div>
+  </main>
+
+  <aside id="panel">
+    <div class="ph"><h2 id="panelTitle"></h2><button class="icon-btn" id="panelClose" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="tabs" id="panelTabs"></div>
+    <div id="panelBody" class="scroll"></div>
+  </aside>
+</div>
+
+<div id="modal"><div id="modalBox"><div id="modalHead"><h3 id="modalTitle"></h3><span id="modalExtra"></span><button class="icon-btn" id="modalClose" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div><div id="modalBody" class="scroll"></div><div id="modalFoot" hidden></div></div></div>
+<div id="toast"></div>
+<div id="keyGate"><div class="box"><img src="/web/img/gemma_portrait.jpg" alt=""><h2 style="font-weight:500;margin:0 0 6px">Gemma</h2>
+  <p class="note" style="margin:0 0 16px">Enter Vision's access key. It stays in this browser only.</p>
+  <div class="field"><input id="keyInput" type="password" placeholder="Access key" autocomplete="current-password"></div>
+  <button class="btn primary" id="keySave" style="width:100%">Unlock</button><p class="problem" id="keyErr"></p></div></div>
+<input type="file" id="filePick" multiple hidden>
+<script src="/web/app.js"></script>
+</body>
+</html>

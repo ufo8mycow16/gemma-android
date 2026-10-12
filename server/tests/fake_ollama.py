@@ -46,7 +46,7 @@ def purpose_of(payload):
         return "document_summary"
     if "prepare one line of Gemma" in system:
         return "voice_performance"
-    if "summary" in system.lower() and "conversation" in system.lower() and payload.get("format") != "json":
+    if "conversation summary component" in system:
         return "conversation_summary"
     if payload.get("format") == "json":
         return "json_other"

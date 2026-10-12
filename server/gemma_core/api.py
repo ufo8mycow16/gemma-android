@@ -159,6 +159,10 @@ def register(app):
         for k, v in body.items():
             if k not in schema:
                 continue
+            if schema[k].get("type") == "list":
+                if not isinstance(v, list) or not all(isinstance(x, dict) and isinstance(x.get("path"), str) and x.get("mode", "read") in ("read", "write") for x in v):
+                    return _err("Each entry needs a folder path and read or write.", "validation_error", 400)
+                v = [{"path": x["path"].strip(), "mode": x.get("mode", "read")} for x in v if x["path"].strip()][:50]
             if schema[k].get("type") == "secret":
                 secrets.put(pid, k, (str(v).strip() or None) if v is not None else None)
             else:

@@ -5214,7 +5214,23 @@ def diagnostics_page():
 
 @app.get("/")
 def home():
+    """The web client (server/web). The previous built-in page stays available at /classic."""
+    from flask import send_from_directory
+    return send_from_directory(WEB_DIR, "index.html", max_age=0)
+
+
+@app.get("/classic")
+def classic_home():
     return Response(HTML, mimetype="text/html")
+
+
+@app.get("/web/<path:name>")
+def web_static(name):
+    """The web client's own files (scripts, styles, pictures). No data lives here; everything else is behind the key."""
+    from flask import send_from_directory
+    resp = send_from_directory(WEB_DIR, name, max_age=0)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
 
 @app.get("/api/conversations")
 def conversations():
