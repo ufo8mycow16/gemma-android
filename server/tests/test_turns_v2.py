@@ -79,8 +79,9 @@ try:
     live.clear_calls()
     live.turn(cid, "What do you think of the whole script as a story?")
     cw = user_content(last_chat(live))
-    ok("<document_overview" in cw, "whole-script question gets the whole-document overview")
-    ok("<document_outline" in cw and "Episode 3 – Acting Captain" in cw, "whole-script question gets the real outline")
+    # Since story ranges (index v3): every episode from its own range, plus the document map, instead of a v9 overview and outline.
+    ok("<document_map" in cw and cw.count("<story_part ") >= 4, "whole-script question gets every episode from its own range")
+    ok("Episode 3 – Acting Captain" in cw, "whole-script question names the real episodes")
     ok('target="episode 4"' not in cw and 'target="episode 3"' not in cw, "no structural lookup for a whole-script question")
     ok("asking for YOUR opinion" in cw, "an opinion request is marked as one")
 

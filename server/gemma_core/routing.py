@@ -46,6 +46,11 @@ _SMALLTALK_RE = re.compile(
     r"^\W*(thanks|thank you|cheers|ta|ok(ay)?|cool|nice|great|awesome|lol|haha+|hehe+|yes|yeah|yep|no|nope|"
     r"sure|alright|night|goodnight|bye|see you|love you|miss(ed)? you|sorry|wow|oh|aw+|ah+|hmm+|brilliant|perfect)\b", re.I)
 _CONTINUE_RE = re.compile(r"\b(continue|keep|carry on|resume|finish|pick up where)\b.*\b(reading|processing|the document|the script|the file|where you (left off|stopped))\b", re.I)
+# "What else happens after the intro?", "what happens next?", "tell me about the rest of the story": about the
+# document's events even though it names no document.
+_STORY_RE = re.compile(r"\b(what (else )?happens|what happened|what comes (next|after)|after the (intro|introduction|prologue|opening|"
+                       r"beginning|first (episode|part|chapter))|the rest of (it|the (story|script|plot))|later in the (story|script)|"
+                       r"how does it end|the ending|plot|storyline)\b", re.I)
 _FOLLOWUP_RE = re.compile(r"^\W*(and|what about|how about|then|after that|what happens next|next one|the next)\b", re.I)
 
 
@@ -139,6 +144,10 @@ def classify(text: str, *, attachment_now: bool = False, documents_known: bool =
                 return r
             # Talks about the document but asks nothing ("you should now have the whole script").
             r.intent, r.confidence, r.reasons = "CONVERSATIONAL", 0.75, ["mentions a document but makes no request"]
+            return r
+        if is_request and _STORY_RE.search(q) and not target:
+            # The story as a whole ("what else happens after the intro?"): every part from its own range, not keyword hits.
+            r.intent, r.confidence, r.reasons = "WHOLE_DOCUMENT_ANALYSIS", 0.7, ["asks about the story's events, and a document is loaded"]
             return r
         if previous is not None and previous.is_document and _FOLLOWUP_RE.search(q) and is_request and len(words) <= 12:
             r.intent, r.confidence, r.reasons = "DOCUMENT_QUESTION", 0.6, ["short follow-up to a document question"]

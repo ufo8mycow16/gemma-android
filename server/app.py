@@ -4422,6 +4422,29 @@ def _overview_for(aid):
     return None
 
 
+STRUCTURAL_PART_BUDGET = 72000     # characters across all story parts for a whole-document answer
+
+
+def _story_map_block(aid):
+    parts = gdocs.story_map(aid)
+    front = gdocs.front_matter(aid)
+    q = lambda v: json.dumps(v, ensure_ascii=False)
+    lines = []
+    if front and parts and parts[0]["start_char"] > 0:
+        lines.append(f"- Front matter before the story ({parts[0]['start_char']:,} characters): " + "; ".join(t[:60] for t in front))
+    for p in parts:
+        label = p["title"] if p["source"] == "headings" else f"{p['kind'].title()} {p['number']}"
+        extra = f" — {p['note']}" if p["source"] == "inferred" and p.get("note") else ""
+        lines.append(f"- {label} ({p['span_chars']:,} characters){extra}")
+    kinds = sorted({p["kind"] for p in parts if p["number"] is not None})
+    count = sum(1 for p in parts if p["number"] is not None)
+    return (f"<document_map name={q(_doc_name(aid))} source=\"Gemma's index of the complete uploaded file\">\n"
+            f"This is the complete uploaded document, not a summary of it. Its story parts, in order:\n" + "\n".join(lines) +
+            f"\nThat is every {', '.join(kinds) or 'part'} in this document ({count} in all). Numbered headings such as "
+            "\"17.22\" or \"Act Three\" are sections inside these parts, never extra episodes. Never ask Glen for parts "
+            "listed here, and never say a listed part is missing.\n</document_map>")
+
+
 def build_document_material(cid, route, user_text, docs_now, active_id, progress=None):
     """The document evidence for this turn, chosen by route. Returns (text, facts for Diagnostics)."""
     blocks, facts = [], {"route": route.intent, "active_doc": active_id}
@@ -4438,6 +4461,15 @@ def build_document_material(cid, route, user_text, docs_now, active_id, progress
         except Exception as e:
             observe.warn("DOCUMENT", "indexing failed; this document is skipped for the turn", doc=aid, error=f"{type(e).__name__}: {e}")
     small = {d["id"]: d for d in docs_now if len(d.get("text") or "") <= MAX_DOCUMENT_CHARS}
+
+    # What the document is and which story parts it really contains, from the index (never from memory or history).
+    # Given on every document turn, so Gemma can't call the complete script a design summary or ask for parts it has.
+    mapped = [aid for aid in ids[:3] if gdocs.story_map(aid)]
+    for aid in mapped:
+        blocks.append(_story_map_block(aid))
+    facts["story_map"] = {aid: [p["title"][:40] for p in gdocs.story_map(aid)] for aid in mapped}
+    per_part = route.intent == "WHOLE_DOCUMENT_ANALYSIS" and not route.target and bool(mapped)
+
     for d in docs_now:
         if d["id"] in small:
             note = f"\n[Extraction note: {d['warning']}]" if d.get("warning") else ""
@@ -4475,7 +4507,33 @@ def build_document_material(cid, route, user_text, docs_now, active_id, progress
                 "the story; say you couldn't find it, and mention the parts that do exist if that helps."
                 + (" Parts found: " + "; ".join(outline[:30]) if outline else "") + "</document_retrieval_status>")
 
-    if route.intent in ("WHOLE_DOCUMENT_ANALYSIS", "RESUME_DOCUMENT") or any(d["id"] not in small for d in docs_now):
+    if per_part:
+        # "A synopsis of each episode", "what do you think of the whole script": every story part from its own exact
+        # range, original text when it fits, otherwise a faithful summary of that range (made once, then cached).
+        aid = mapped[0]
+        parts = gdocs.story_map(aid)
+        share = max(4000, STRUCTURAL_PART_BUDGET // max(1, len(parts)))
+        used = []
+        for part in parts:
+            text = gdocs.section_text(part["version_id"], part["start_char"], part["end_char"]).strip()
+            mode = "original"
+            if len(text) > share:
+                summary = gdocs.range_summary(part, _summarise_for_section, progress)
+                if summary:
+                    text, mode = summary, "faithful summary of the original part"
+                else:
+                    cut = text.rfind("\n", 0, share)
+                    text, mode = text[:cut if cut > share // 2 else share], "original, beginning only"
+            if len(text) > share * 2:
+                cut = text.rfind("\n", 0, share * 2)
+                text = text[:cut if cut > share else share * 2]
+            label = part["title"] if part["source"] == "headings" else f"{part['kind'].title()} {part['number']}"
+            blocks.append(f"<story_part document={q(_doc_name(aid))} part={q(label)} source={q(mode)}>\n{text}\n</story_part>")
+            used.append({"part": label, "mode": mode, "chars": len(text)})
+        facts.update(per_part=used)
+        observe.event("RETRIEVAL", "every story part given from its own range", doc=aid, parts=used)
+
+    if not per_part and (route.intent in ("WHOLE_DOCUMENT_ANALYSIS", "RESUME_DOCUMENT") or any(d["id"] not in small for d in docs_now)):
         targets = [active_id] if active_id else []
         targets += [d["id"] for d in docs_now if d["id"] not in small and d["id"] not in targets]
         for aid in targets:

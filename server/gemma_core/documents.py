@@ -54,7 +54,7 @@ from xml.etree import ElementTree as ET
 from . import observe
 from .routing import number_token
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3          # 3: story ranges (episodes from heading to the next episode, whatever the Word styles say)
 TARGET_CHARS = 3200
 MAX_CHARS = 4800
 CARRY_CHARS = 500
@@ -99,6 +99,15 @@ def init(*, db, lock, upload_dir: Path, embed, now, text_hash, embed_model: str 
           heading_path TEXT NOT NULL, text TEXT NOT NULL, tokens INTEGER NOT NULL, carried INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS doc_chunks_by_doc ON doc_chunks(attachment_id, ordinal);
+        -- A story part's whole range ("Episode 4" from its first heading to where Episode 5 begins), independent
+        -- of Word heading levels. source: "headings" (found by its own headings) or "inferred" (no heading of its own;
+        -- placed between its neighbours and confirmed by the text naming itself).
+        CREATE TABLE IF NOT EXISTS doc_ranges(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, version_id INTEGER NOT NULL, attachment_id INTEGER NOT NULL,
+          ordinal INTEGER NOT NULL, kind TEXT NOT NULL, number INTEGER, title TEXT NOT NULL,
+          start_char INTEGER NOT NULL, end_char INTEGER NOT NULL, source TEXT NOT NULL, headings TEXT, note TEXT
+        );
+        CREATE INDEX IF NOT EXISTS doc_ranges_lookup ON doc_ranges(attachment_id, kind, number);
         CREATE TABLE IF NOT EXISTS doc_section_summaries(
           version_id INTEGER NOT NULL, section_ordinal INTEGER NOT NULL, summary TEXT NOT NULL,
           mode TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(version_id, section_ordinal)
@@ -305,6 +314,7 @@ class Index:
     sections: list[Section] = field(default_factory=list)
     chunks: list[dict] = field(default_factory=list)
     heading_source: str = "none"
+    ranges: list[dict] = field(default_factory=list)
 
 
 def build_index(blocks: list[Block]) -> Index:
@@ -413,7 +423,139 @@ def build_index(blocks: list[Block]) -> Index:
             continue
         idx.chunks.append({"ordinal": i, "section": sec.ordinal, "start": s, "end": e, "path": sec.path,
                            "text": body, "tokens": max(1, len(body) // 4), "carried": carried})
+    idx.ranges = story_ranges(idx)
     return idx
+
+
+# ----------------------------------------------------------------- story ranges
+
+_NUMWORD = r"(\d{1,3}|[ivxlc]{1,6}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+_END_RE = re.compile(rf"^(?:end of (?P<k1>episode|chapter|part)\s+(?P<n1>{_NUMWORD})|(?P<k2>episode|chapter|part)\s+(?P<n2>{_NUMWORD})\s+"
+                     r"(?:complete|completed|ends|ended|end|concludes))\W*$", re.I)
+_SIDE_KINDS = {"prologue": 0, "epilogue": 10_000}
+MIN_RANGE_HEADING_SPAN = 200     # an unstyled "Episode 3" line with almost nothing under it is a list entry, not a start
+
+
+def _num(raw):
+    return number_token(raw) or _roman_big(raw)
+
+
+def story_ranges(idx: Index) -> list[dict]:
+    """
+    Where each episode (or chapter, or part) really runs: from its first genuine heading to where the next one
+    begins or its own end marker ("EPISODE 1 COMPLETE", "END OF EPISODE 4."), whatever heading levels the
+    document's styles use. Contents lists and variable tables that merely name the episodes are not starts.
+    An episode with no heading of its own (the next one jumps from 1 to 3) is inferred from the gap between
+    its neighbours, but only when that text keeps naming itself ("Episode 2 is Spock's episode").
+    """
+    text, secs = idx.text, idx.sections[1:]
+    starts_sorted = sorted(s.start for s in secs)
+
+    def own_span(s):
+        later = next((x for x in starts_sorted if x > s.start), len(text))
+        return later - s.start
+
+    # Lines naming several parts close together ("Episode 1 / Episode 2 / … / Episode 5" in a variables table or a
+    # contents list) are a list, even when the last of them happens to be followed by a paragraph.
+    listed = set()
+    named = sorted((s for s in secs if s.kind in ("episode", "part", "chapter") and s.number and s.source != "style"), key=lambda s: s.start)
+    run = []
+    for s in named + [None]:
+        if s is not None and run and s.start - run[-1].start < MIN_RANGE_HEADING_SPAN and s.kind == run[-1].kind:
+            run.append(s)
+            continue
+        if len(run) >= 2:
+            listed.update(x.ordinal for x in run)
+        run = [s] if s is not None else []
+
+    def qualifies(s):
+        if s.ordinal in listed:
+            return False
+        return s.source == "style" or own_span(s) >= MIN_RANGE_HEADING_SPAN
+
+    primary = None
+    for kind in ("episode", "part", "chapter"):
+        if len({s.number for s in secs if s.kind == kind and s.number and qualifies(s)}) >= 2:
+            primary = kind
+            break
+    if primary is None:
+        return []
+    events = []          # (pos, order, type, kind, number, title, end_pos)
+    for s in secs:
+        if not qualifies(s):
+            continue
+        line = " ".join(s.title.split())
+        m = _END_RE.match(line)
+        if m and (m.group("k1") or m.group("k2")).lower() == primary:
+            events.append((s.start, 1, "end", primary, _num(m.group("n1") or m.group("n2")), line, s.end))
+            continue
+        if s.kind == primary and s.number:
+            events.append((s.start, 0, "start", primary, s.number, s.title, None))
+        elif s.kind in _SIDE_KINDS:
+            events.append((s.start, 0, "start", s.kind, _SIDE_KINDS[s.kind], s.title, None))
+    heading_starts = {e[0] for e in events}
+    for m in re.finditer(r"[^\n]{4,60}", text):
+        if m.start() in heading_starts:
+            continue
+        e = _END_RE.match(m.group(0).strip())
+        if e and (e.group("k1") or e.group("k2")).lower() == primary:
+            events.append((m.start(), 1, "end", primary, _num(e.group("n1") or e.group("n2")), m.group(0).strip(), m.end()))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    ranges, cur, done = [], None, set()
+    order_of = lambda kind, n: n if kind == primary else _SIDE_KINDS[kind] if kind in _SIDE_KINDS else n
+    last_order = -1
+    for pos, _, typ, kind, number, title, end_pos in events:
+        key = (kind, number)
+        if typ == "start":
+            if cur and cur["key"] == key:
+                cur["headings"].append(title)
+                continue
+            # A later heading naming an earlier part (a recap, a reference) is not that part starting again.
+            if key in done or order_of(kind, number) < last_order:
+                continue
+            if cur:
+                cur["end"] = pos
+                ranges.append(cur)
+                done.add(cur["key"])
+            cur = {"key": key, "kind": kind, "number": number if kind == primary else None, "title": title,
+                   "start": pos, "end": len(text), "source": "headings", "headings": [title], "note": ""}
+            last_order = order_of(kind, number)
+        elif cur and cur["key"] == key:
+            cur["end"] = end_pos
+            cur["note"] = f"ends at “{title}”"
+            ranges.append(cur)
+            done.add(key)
+            cur = None
+        elif cur is None and ranges and ranges[-1]["key"] == key and end_pos > ranges[-1]["end"]:
+            # A second end marker (END OF EPISODE 1, then the EPISODE 1 COMPLETE screen): the part runs to the last one.
+            ranges[-1]["end"] = end_pos
+            ranges[-1]["note"] = f"ends at “{title}”"
+    if cur:
+        ranges.append(cur)
+
+    # Fill one missing number between neighbours when the text in the gap names itself.
+    filled = []
+    for a, b in zip(ranges, ranges[1:] + [None]):
+        filled.append(a)
+        if b is None or a["kind"] != primary or b["kind"] != primary or b["number"] != a["number"] + 2:
+            continue
+        gap = text[a["end"]:b["start"]]
+        n = a["number"] + 1
+        naming = len(re.findall(rf"\b{primary}\s+({n}|{_WORD_FOR.get(n, '#')})\b", gap[:60000], re.I))
+        if len(gap.strip()) >= 2000 and naming >= 3:
+            first = next((x for x in gap.splitlines() if x.strip()), "").strip()[:80]
+            filled.append({"key": (primary, n), "kind": primary, "number": n, "title": f"{primary.title()} {n}",
+                           "start": a["end"], "end": b["start"], "source": "inferred", "headings": [first] if first else [],
+                           "note": f"no heading of its own; placed between “{a['title'][:60]}” and “{b['title'][:60]}”, "
+                                   f"and the text names itself {primary.title()} {n} {naming} times"})
+    for r in filled:
+        r.pop("key", None)
+    return filled
+
+
+_WORD_FOR = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+             11: "eleven", 12: "twelve"}
 
 
 # ----------------------------------------------------------------- storage
@@ -472,6 +614,12 @@ def ensure_index(attachment_id: int, data: bytes | None = None, progress=None):
                     "start_char,end_char,body_chars,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (vid, attachment_id, s.ordinal, s.level, s.kind, s.number, s.title, s.path, s.parent,
                      s.start, s.end, s.body_chars, s.source))
+            for i, r in enumerate(idx.ranges):
+                con.execute(
+                    "INSERT INTO doc_ranges(version_id,attachment_id,ordinal,kind,number,title,start_char,end_char,source,headings,note) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (vid, attachment_id, i, r["kind"], r["number"], r["title"], r["start"], r["end"], r["source"],
+                     json.dumps(r["headings"][:12], ensure_ascii=False), r["note"]))
             for c in idx.chunks:
                 con.execute(
                     "INSERT INTO doc_chunks(version_id,attachment_id,section_ordinal,ordinal,start_char,end_char,heading_path,text,tokens,carried) "
@@ -480,6 +628,7 @@ def ensure_index(attachment_id: int, data: bytes | None = None, progress=None):
         info.update(version=vid, sha=sha[:12], blocks=len(blocks), headings_from=idx.heading_source,
                     sections=len(idx.sections) - 1, chunks=len(idx.chunks), chars=len(idx.text),
                     structural=[f"{s.kind} {s.number}" for s in idx.sections if s.kind and s.number][:40],
+                    story_ranges=[{"part": r["title"][:60], "range": [r["start"], r["end"]], "source": r["source"]} for r in idx.ranges],
                     carried_overlaps=sum(1 for c in idx.chunks if c["carried"]))
     progress("indexing", f"Indexing {att['original_name'] or 'document'}…", doc_stage="indexing")
     threading.Thread(target=observe.run_in_context(_embed_version, vid), daemon=True, name=f"embed-doc-{attachment_id}").start()
@@ -536,11 +685,46 @@ def authorities() -> list[dict]:
 
 # ---------------------------------------------------------------- retrieval
 
+RANGE_ORDINAL_BASE = 1_000_000      # summary-cache keys for story ranges, apart from section ordinals
+
+
+def story_map(attachment_id: int) -> list[dict]:
+    """The story parts of one document, in order, with their real character ranges."""
+    db = _CTX["db"]
+    v = version_for(attachment_id)
+    if not v:
+        return []
+    with db() as con:
+        return [dict(r, version_id=v["id"], ordinal=RANGE_ORDINAL_BASE + r["ordinal"], start_char=r["start_char"],
+                     span_chars=r["end_char"] - r["start_char"], body_chars=r["end_char"] - r["start_char"],
+                     path=r["title"], range=True)
+                for r in con.execute("SELECT * FROM doc_ranges WHERE version_id=? ORDER BY start_char", (v["id"],))]
+
+
+def front_matter(attachment_id: int, limit: int = 4) -> list[str]:
+    """Headings before the first story part (title pages, design standards, contents)."""
+    parts = story_map(attachment_id)
+    if not parts:
+        return []
+    db = _CTX["db"]
+    with db() as con:
+        return [r["title"] for r in con.execute(
+            "SELECT title FROM doc_sections WHERE version_id=? AND ordinal>0 AND start_char<? AND level<=2 ORDER BY start_char LIMIT ?",
+            (parts[0]["version_id"], parts[0]["start_char"], limit))]
+
+
 def find_sections(attachment_ids, kind: str, number: int) -> list[dict]:
-    """Every genuine heading for kind+number in these documents, best (longest body) first."""
+    """The story range for kind+number if the document has one (heading levels don't matter), otherwise every
+    genuine heading for it, best (longest body) first."""
     if not attachment_ids:
         return []
     db = _CTX["db"]
+    out = []
+    for aid in attachment_ids:
+        for r in story_map(aid):
+            if r["kind"] == kind and (r["number"] == number or (number is None and r["number"] is None)):
+                out.append(r)
+    ranges = out
     out = []
     with db() as con:
         for aid in attachment_ids:
@@ -551,7 +735,8 @@ def find_sections(attachment_ids, kind: str, number: int) -> list[dict]:
             for s in con.execute("SELECT * FROM doc_sections WHERE version_id=? AND kind=? AND number=?", (v["id"], kind, number)):
                 out.append(dict(s, span_chars=s["end_char"] - s["start_char"]))
     out.sort(key=lambda s: (s["span_chars"], s["body_chars"]), reverse=True)
-    return out
+    # The story range wins; the individual headings follow, so Diagnostics shows what was passed over.
+    return ranges + out
 
 
 def section_text(version_id: int, start: int, end: int) -> str:
@@ -573,17 +758,23 @@ def structural_evidence(attachment_ids, kind: str, number: int, budget: int = ST
         return result
     best = candidates[0]
     text = section_text(best["version_id"], best["start_char"], best["end_char"]).strip()
+    if best.get("range"):
+        text = _mark_recaps(best, text, kind, number)
     db = _CTX["db"]
     with db() as con:
         nxt = con.execute("SELECT title FROM doc_sections WHERE version_id=? AND start_char>=? ORDER BY start_char LIMIT 1",
                           (best["version_id"], best["end_char"])).fetchone()
+    if best.get("range"):
+        nxt = None
+        later = [r for r in story_map(best["attachment_id"]) if r["start_char"] >= best["end_char"]]
+        nxt = {"title": later[0]["title"]} if later else None
     result.update(found=True, attachment_id=best["attachment_id"], version_id=best["version_id"], section=best["title"],
                   path=best["path"], start=best["start_char"], end=best["end_char"], stop_boundary=nxt["title"] if nxt else "(end of document)",
                   truncated=False, mode="original")
     if len(text) > budget:
         summary = None
         if summarise is not None:
-            summary = section_summary(best, summarise, progress)
+            summary = range_summary(best, summarise, progress) if best.get("range") else section_summary(best, summarise, progress)
         if summary:
             result.update(text=summary, mode="section_summary_of_original", truncated=False,
                           original_chars=len(text))
@@ -592,11 +783,81 @@ def structural_evidence(attachment_ids, kind: str, number: int, budget: int = ST
             result.update(text=text[:cut if cut > budget // 2 else budget], truncated=True, original_chars=len(text))
     else:
         result["text"] = text
+    if best.get("range"):
+        result.update(range_source=best["source"], range_note=best.get("note") or "")
     observe.event("RETRIEVAL", "structural section selected", doc=best["attachment_id"], target=result["target"],
+                  story_range=bool(best.get("range")), range_source=best.get("source"),
                   heading=best["title"], heading_source=best["source"], range=[best["start_char"], best["end_char"]],
                   stop_boundary=result["stop_boundary"], evidence_chars=len(result.get("text") or ""), mode=result["mode"],
                   rejected=[{"title": c["title"], "chars": c["span_chars"]} for c in candidates[1:5]])
     return result
+
+
+def _mark_recaps(part: dict, text: str, kind: str, number) -> str:
+    """Inside Episode 4, a heading such as "Opening Recap — The End of Episode 3" introduces Episode 3's events.
+    Say so in the evidence, so they are never told as Episode 4's."""
+    db = _CTX["db"]
+    with db() as con:
+        heads = con.execute("SELECT title, start_char FROM doc_sections WHERE version_id=? AND start_char>? AND start_char<? ORDER BY start_char",
+                            (part["version_id"], part["start_char"], part["end_char"])).fetchall()
+    pat = re.compile(rf"\b{kind}\s+{_NUMWORD}\b", re.I)
+    out, last = [], 0
+    base = part["start_char"]
+    lead = len(section_text(part["version_id"], part["start_char"], part["end_char"])) - len(section_text(part["version_id"], part["start_char"], part["end_char"]).lstrip())
+    for h in heads:
+        m = pat.search(h["title"])
+        if not m or _num(m.group(1)) == number:
+            continue
+        at = h["start_char"] - base - lead
+        if 0 <= at <= len(text):
+            other = _num(m.group(1))
+            out.append(text[last:at])
+            out.append(f"[Note from Gemma's document index: the part below, headed “{h['title'][:80]}”, recaps or refers to "
+                       f"{kind.title()} {other}. Those are {kind.title()} {other}'s events, not new {kind.title()} {number} events.]\n")
+            last = at
+    out.append(text[last:])
+    return "".join(out)
+
+
+def range_summary(part: dict, summarise, progress=None) -> str | None:
+    """A faithful summary of one whole story part (episode), built from its exact text range in pieces, and cached."""
+    db, lock = _CTX["db"], _CTX["lock"]
+    vid, key = part["version_id"], part["ordinal"]
+    with db() as con:
+        cached = con.execute("SELECT summary FROM doc_section_summaries WHERE version_id=? AND section_ordinal=?", (vid, key)).fetchone()
+    if cached:
+        observe.event("DOCUMENT", "story part summary cache hit", part=part["title"])
+        return cached["summary"]
+    text = section_text(vid, part["start_char"], part["end_char"])
+    parts, pos = [], 0
+    while pos < len(text):
+        end = min(len(text), pos + 20000)
+        if end < len(text):
+            cut = text.rfind("\n", pos + 10000, end)
+            end = cut if cut > pos else end
+        parts.append(text[pos:end])
+        pos = end
+    label = part["title"] if part["source"] == "headings" else f"{part['kind'].title()} {part['number']}"
+    notes = []
+    for i, piece in enumerate(parts, 1):
+        if progress:
+            pct = max(1, min(99, round(i / len(parts) * 99)))
+            progress("analysing", f"Reading {label} closely — part {i}/{len(parts)} · {pct}%", done=i - 1, total=len(parts),
+                     percent=pct, doc_stage="analysing", doc_name=label)
+        try:
+            notes.append(summarise(f"{label} (part {i} of {len(parts)})\n\n{piece}\n\n"
+                                   "Write a dense, faithful account of the story events in this part, in order: who does what, where, "
+                                   "and what is discovered. Keep every named character, place and event. Production notes (file names, "
+                                   "variables, recording lists) only in a line if they matter. If a passage is a recap of an earlier "
+                                   "episode, say so. Add nothing that is not in the text."))
+        except Exception as e:
+            observe.warn("DOCUMENT", "story part summary failed", part=label, piece=i, error=str(e))
+            return None
+    summary = "\n\n".join(notes)
+    with lock, db() as con:
+        con.execute("INSERT OR REPLACE INTO doc_section_summaries(version_id,section_ordinal,summary,mode,created_at) VALUES(?,?,?,?,?)",
+                    (vid, key, summary, "generated", _CTX["now"]()))
+    return summary
 
 
 def section_summary(section_row: dict, summarise, progress=None) -> str | None:
