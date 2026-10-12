@@ -14,7 +14,7 @@ object CoreChecks {
 
     fun runAll(): Int {
         count = 0
-        events(); addresses(); reducerHappyPath(); reducerStopAndFailure(); reducerHistory(); speechQueue(); turnIds(); messages()
+        events(); addresses(); reducerHappyPath(); reducerStopAndFailure(); reducerHistory(); speechQueue(); turnIds(); messages(); codeBlocks(); highlighting(); cards(); docProgress(); relativeTimes()
         return count
     }
 
@@ -161,6 +161,84 @@ object CoreChecks {
             GemmaFailure.Api("turn_active", "x", 409), GemmaFailure.Api("validation_error", "x", 400), GemmaFailure.Api("conversation_not_found", "x", 404),
             GemmaFailure.Api("attachment_rejected", "x", 413), GemmaFailure.Api("voice_unavailable", "x", 503), GemmaFailure.Api("something_new", "x", 500))
         for (f in all) check(f.userMessage().isNotBlank() && !f.userMessage().contains("Exception") && !f.userMessage().contains("java.")) { "plain wording for ${f.javaClass.simpleName}" }
+    }
+
+    private fun codeBlocks() {
+        val md = Markdown.parse("Here:\n\n```gdscript player.gd\nextends Node\n\tvar x = 1\n```\nDone.")
+        val code = md.filterIsInstance<MdBlock.Code>().single()
+        eq(code.lang, "gdscript", "fence language"); eq(code.filename, "player.gd", "fence filename")
+        eq(code.text, "extends Node\n\tvar x = 1", "code text exact, tabs kept"); check(!code.open) { "closed block" }
+        eq(Markdown.fenceInfo("python title=\"app.py\""), "python" to "app.py", "title= filename")
+        eq(Markdown.fenceInfo("main.py"), "py" to "main.py", "a bare filename gives its language")
+        val live = Markdown.parse("Writing:\n```python\ndef a():\n    pass").filterIsInstance<MdBlock.Code>().single()
+        check(live.open && live.text == "def a():\n    pass") { "an unclosed fence is shown as code while it streams" }
+        val named = Markdown.parse("```python\n# utils/helpers.py\nx = 1\n```").filterIsInstance<MdBlock.Code>().single()
+        eq(named.filename, "utils/helpers.py", "filename from a first-line comment")
+    }
+
+    private fun highlighting() {
+        val src = "@export var speed: float = 3.5 # fast\nfunc _ready():\n\tprint(\"hi\")\n"
+        val p = Highlight.pieces(src, "gd")
+        eq(p.joinToString("") { it.text }, src, "highlighting never changes the code")
+        check(p.any { it.tok == Tok.KEYWORD && it.text == "func" } && p.any { it.tok == Tok.COMMENT && it.text == "# fast" } &&
+            p.any { it.tok == Tok.STRING && it.text == "\"hi\"" } && p.any { it.tok == Tok.DECORATOR } && p.any { it.tok == Tok.NUMBER && it.text == "3.5" }) { "GDScript tokens: $p" }
+        val py = "def f(a):\n    \"\"\"Doc.\"\"\"\n    return a  # x\n"
+        val q = Highlight.pieces(py, "python")
+        eq(q.joinToString("") { it.text }, py, "python round trip")
+        check(q.any { it.tok == Tok.FUNCTION && it.text == "f" } && q.any { it.tok == Tok.STRING && it.text.startsWith("\"\"\"") }) { "python tokens" }
+        eq(Highlight.pieces("plain words", "unknownlang").single().tok, Tok.PLAIN, "unknown languages are left plain")
+        eq(Highlight.defaultFilename("gdscript"), "snippet.gd", "save name for GDScript")
+    }
+
+    private fun cards() {
+        val line = """{"type":"done","turn_id":"turn0009","reply":"Made it.","message_id":42,"user_message_id":41,
+            "artifacts":[{"id":"a0123456789abcde","kind":"code","filename":"utility.py","mime":"text/x-python","size":30,"url":"/api/v1/artifacts/a0123456789abcde/content","created_by":"gemma","provenance":{}}],
+            "jobs":[{"id":"j1","kind":"image","title":"Generating an image","state":"running","progress":0.42,"progress_text":"Generating… 42%","result":null}],
+            "approvals":[{"id":"p1","plugin":"local_git","tool":"git_commit","title":"Commit","state":"pending","preview":{"title":"Commit to proj","risk":"medium","fields":[["Branch","main"]],"body":"a.txt | 2"}}]}""".replace("\n", "")
+        val done = Events.parse(line) as TurnEvent.Done
+        eq(done.result.messageId, 42L, "reply id"); eq(done.result.artifacts.single().filename, "utility.py", "file card")
+        eq(done.result.jobs.single().percent, 42, "the job percentage is the server's own")
+        val ap = done.result.approvals.single(); check(ap.pending && ap.fields == listOf("Branch" to "main") && ap.risk == "medium") { "approval preview" }
+        var s = ChatReducer.reduce(connected(), ChatAction.SendStarted("turn0009", "make it", files = listOf("notes.zip")))
+        check(s.messages.last { it.role == "user" }.createdAt.isNotEmpty()) { "my message has a time at once" }
+        eq(s.messages.last { it.role == "user" }.pendingFiles, listOf("notes.zip"), "attached file names show on my bubble")
+        s = ChatReducer.reduce(s, ChatAction.Event("turn0009", done))
+        val reply = s.messages.last()
+        check(reply.id == 42L && reply.artifacts.size == 1 && reply.jobs.size == 1 && reply.approvals.size == 1) { "cards land on her reply" }
+        eq(s.runningJobs.map { it.id }, listOf("j1"), "running tasks are known")
+        s = ChatReducer.reduce(s, ChatAction.JobUpdated(reply.jobs[0].copy(state = "done", progress = 1.0, resultArtifactId = "a1")))
+        check(s.runningJobs.isEmpty() && s.messages.last().jobs[0].state == "done") { "task update applies" }
+        s = ChatReducer.reduce(s, ChatAction.ApprovalUpdated(ap.copy(state = "executed")))
+        eq(s.messages.last().approvals[0].state, "executed", "approval outcome applies")
+        val m = Message(5, "assistant", "x", null, emptyList(), "", artifacts = listOf(done.result.artifacts[0].copy(id = "a1", kind = "image")),
+            jobs = listOf(reply.jobs[0].copy(state = "done", resultArtifactId = "a1")))
+        s = ChatReducer.reduce(connected(), ChatAction.HistoryLoaded(Conversation(7, "", true), HistoryPage(7, listOf(m), false, null)))
+        check(s.messages.single().jobs.isEmpty() && s.messages.single().artifacts.size == 1) { "a finished picture shows once, not as card and picture" }
+    }
+
+    private fun docProgress() {
+        var s = ChatReducer.reduce(connected(), ChatAction.SendStarted("turn0010", "read this"))
+        val ev = Events.parse("""{"type":"status","stage":"analysing","label":"Reading Ep4.docx — 3/10 · 28%","done":2,"total":10,"percent":28,"doc_stage":"analysing","doc_name":"Ep4.docx"}""")!!
+        s = ChatReducer.reduce(s, ChatAction.Event("turn0010", ev))
+        val d = s.docProgress!!
+        check(d.percent == 28 && d.done == 2 && d.total == 10 && d.name == "Ep4.docx" && d.stage == "analysing") { "document progress from the server: $d" }
+        s = ChatReducer.reduce(s, ChatAction.Event("turn0010", TurnEvent.Done(TurnResult("turn0010", "Read it.", null, false, false))))
+        eq(s.docOutcome, "complete", "the document card ends as COMPLETE")
+        s = ChatReducer.reduce(s, ChatAction.SendStarted("turn0011", "again"))
+        check(s.docProgress == null && s.docOutcome == null) { "a new turn starts without an old document card" }
+    }
+
+    private fun relativeTimes() {
+        val now = java.time.OffsetDateTime.parse("2026-10-12T19:00:00+11:00").toInstant().toEpochMilli()
+        val z = java.time.ZoneId.of("Australia/Sydney")
+        eq(RelativeTime.of("2026-10-12T18:59:30+11:00", now, z), "Just now", "under 45 s")
+        eq(RelativeTime.of("2026-10-12T18:59:00+11:00", now, z), "About 1 min ago", "a minute")
+        eq(RelativeTime.of("2026-10-12T18:40:00+11:00", now, z), "About 20 mins ago", "minutes")
+        eq(RelativeTime.of("2026-10-12T15:00:00+11:00", now, z), "About 4 hours ago", "hours")
+        eq(RelativeTime.of("2026-10-11T12:00:00+11:00", now, z), "Yesterday", "yesterday")
+        eq(RelativeTime.of("2026-10-12T07:00:00", now, z), "About 1 hour ago", "a stamp without offset is UTC (07:00Z = 18:00 Sydney)")
+        eq(RelativeTime.of("", now, z), "", "no stamp, no text")
+        check(RelativeTime.of("2026-10-01T12:00:00+11:00", now, z).isNotBlank()) { "older messages show a date" }
     }
 
     @JvmStatic fun main(args: Array<String>) {

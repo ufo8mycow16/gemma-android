@@ -10,6 +10,9 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 
+/** A PDF, Word or text document sent inline with a turn (the server reads it at once, with progress). */
+data class DocumentUpload(val name: String, val mime: String, val dataUrl: String)
+
 /** A server address the person typed, checked and tidied. */
 object ServerAddress {
     sealed class Check {
@@ -181,6 +184,9 @@ class GemmaApi(
             capabilities = o.obj("capabilities")?.mapValues { (_, v) -> v.toString().trim('"') } ?: emptyMap(),
             maxImagesPerTurn = limits?.int("max_images_per_turn") ?: 0,
             maxImageBytes = limits?.long("max_image_bytes") ?: 0,
+            maxDocumentBytes = limits?.long("max_document_bytes") ?: 0,
+            maxUploadBytes = limits?.long("max_upload_bytes") ?: 0,
+            build = o.str("build") ?: "",
         )
     }
 
@@ -201,6 +207,7 @@ class GemmaApi(
                 attachments = (m["attachments"] as? JsonArray)?.mapNotNull { it.asObject() }
                     ?.map { Attachment(it.long("id") ?: 0, it.str("url") ?: "") } ?: emptyList(),
                 createdAt = m.str("created_at") ?: "",
+                artifacts = m.artifacts(), jobs = m.jobs(), approvals = m.approvals(),
             )
         } ?: emptyList()
         return HistoryPage(conversationId, list, o.bool("has_more") ?: false, o.str("active_turn_id"), pendingCalendar(o))
@@ -282,6 +289,70 @@ class GemmaApi(
         return Transcript(o.str("text") ?: "", o.str("language") ?: "", o.double("audio_seconds") ?: 0.0)
     }
 
+    // ---- files, tasks and approvals ------------------------------------------------------
+
+    /**
+     * Upload a file Glen attached (code, a ZIP, audio, a large document) so it can go with the next message.
+     * `progress` gets the real fraction of bytes sent.
+     */
+    fun upload(data: ByteArray, filename: String, conversationId: Long?, progress: (Double) -> Unit = {}): Artifact {
+        val c = try {
+            open("POST", "/api/v1/artifacts" + (conversationId?.let { "?conversation_id=$it" } ?: ""), read = 120000)
+        } catch (e: Exception) {
+            throw GemmaFailure.Unreachable(e.javaClass.simpleName)
+        }
+        try {
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/octet-stream")
+            // Header values must be plain ASCII; the server tidies the name further.
+            c.setRequestProperty("X-Filename", filename.map { if (it.code in 32..126 && it != '"') it else '_' }.joinToString(""))
+            c.setRequestProperty("X-Client", "android")
+            c.setFixedLengthStreamingMode(data.size)
+            c.outputStream.use { out ->
+                var sent = 0
+                while (sent < data.size) {
+                    val n = minOf(65536, data.size - sent)
+                    out.write(data, sent, n)
+                    sent += n
+                    progress(sent.toDouble() / data.size)
+                }
+            }
+            val (status, text) = readAll(c)
+            val json = parseObject(text)
+            if (status == 401) throw GemmaFailure.AuthRequired()
+            if (status >= 400) throw apiFailure(json, status)
+            return json?.let(::artifact) ?: throw GemmaFailure.BadResponse("upload answer had no file")
+        } catch (e: GemmaFailure) {
+            throw e
+        } catch (e: IOException) {
+            throw GemmaFailure.Unreachable("${e.javaClass.simpleName}: ${e.message ?: ""}".take(200))
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    fun artifactInfo(id: String): Artifact = artifact(call("GET", "/api/v1/artifacts/$id")) ?: throw GemmaFailure.BadResponse("no file")
+
+    fun artifacts(conversationId: Long? = null): List<Artifact> =
+        call("GET", "/api/v1/artifacts" + (conversationId?.let { "?conversation_id=$it" } ?: "?limit=200")).artifacts()
+
+    fun job(id: String): Job = job(call("GET", "/api/v1/jobs/$id")) ?: throw GemmaFailure.BadResponse("no task")
+
+    fun runningJobs(): List<Job> = call("GET", "/api/v1/jobs?state=queued,running").jobs()
+
+    fun cancelJob(id: String) {
+        call("POST", "/api/v1/jobs/$id/cancel")
+    }
+
+    /** Allow (once, or always for this kind of action) or cancel. Allowing runs the action exactly once on Vision. */
+    fun decide(approvalId: String, allow: Boolean, always: Boolean = false): Approval {
+        val o = if (allow) call("POST", "/api/v1/approvals/$approvalId/approve", buildJsonObject { put("always", always) })
+        else call("POST", "/api/v1/approvals/$approvalId/deny", buildJsonObject { })
+        return approval(o) ?: throw GemmaFailure.BadResponse("no approval")
+    }
+
+    fun pendingApprovals(): List<Approval> = call("GET", "/api/v1/approvals?state=pending").approvals()
+
     fun newCall(turnId: String) = TurnCall(turnId)
 
     /**
@@ -300,6 +371,8 @@ class GemmaApi(
         images: List<String> = emptyList(),
         voiceStyle: String? = null,
         source: String = "text",
+        documents: List<DocumentUpload> = emptyList(),
+        artifactIds: List<String> = emptyList(),
         onEvent: (TurnEvent) -> Unit,
     ): TurnEvent {
         val body = buildJsonObject {
@@ -310,6 +383,10 @@ class GemmaApi(
             if (voice && voiceStyle != null) put("voice_style", voiceStyle)
             if (client != null) put("client", client)
             if (images.isNotEmpty()) put("images", JsonArray(images.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            if (documents.isNotEmpty()) put("documents", JsonArray(documents.map { d ->
+                buildJsonObject { put("name", d.name); put("mime", d.mime); put("data", d.dataUrl) }
+            }))
+            if (artifactIds.isNotEmpty()) put("artifact_ids", JsonArray(artifactIds.map { kotlinx.serialization.json.JsonPrimitive(it) }))
         }
         return ndjson("/api/v1/conversations/$conversationId/turns", body, call, onEvent) { it is TurnEvent.Done || it is TurnEvent.Failed }
     }

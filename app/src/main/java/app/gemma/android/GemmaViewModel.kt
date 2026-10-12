@@ -45,7 +45,10 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 /** What the settings screen shows after "Test connection". */
-data class ConnectionTest(val running: Boolean = false, val ok: Boolean = false, val message: String = "")
+data class ConnectionTest(
+    val running: Boolean = false, val ok: Boolean = false, val message: String = "",
+    internal val url: String? = null, internal val key: String? = null,
+)
 
 enum class Phase { IDLE, LISTENING, THINKING, SPEAKING }
 
@@ -83,6 +86,16 @@ data class FilesUi(
     val query: String = "", val loading: Boolean = false, val results: FileSearch? = null, val error: String? = null,
     val opening: Boolean = false, val open: FileText? = null,
 )
+
+/** A file waiting to go with the next message. Documents travel inline; anything else is uploaded first, with real progress. */
+data class PendingFile(
+    val id: Long, val name: String, val size: Long, val document: Boolean,
+    val progress: Double = 0.0, val ready: Boolean = false, val error: String? = null,
+    val artifactId: String? = null, internal val dataUrl: String? = null, internal val mime: String = "",
+)
+
+/** A file from Vision opened on the phone (code with colouring, or text). */
+data class ViewerUi(val artifact: gemma.core.Artifact, val text: String? = null, val loading: Boolean = true, val error: String? = null)
 
 data class TranscribeUi(
     val recording: Boolean = false, val working: Boolean = false, val text: String? = null, val error: String? = null,
@@ -140,6 +153,13 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _files = MutableStateFlow(FilesUi())
     val files: StateFlow<FilesUi> = _files
+
+    private val _files2 = MutableStateFlow<List<PendingFile>>(emptyList())
+    /** Files (not pictures) waiting to go with the next message. */
+    val attachments: StateFlow<List<PendingFile>> = _files2
+
+    private val _viewer = MutableStateFlow<ViewerUi?>(null)
+    val viewer: StateFlow<ViewerUi?> = _viewer
 
     private val _transcribe = MutableStateFlow(TranscribeUi())
     val transcribe: StateFlow<TranscribeUi> = _transcribe
@@ -260,27 +280,32 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
                     parts += if (status.modelReady) "Model ready." else "Model unavailable: ${status.modelReason}."
                     parts += if (status.voiceReady) "Voice ready." else "Voice not running."
                     if (status.apiVersion < 2) parts += "Vision is running an older app.py: update it for voice, chats, memory and tools."
-                    ConnectionTest(ok = true, message = parts.joinToString(" "))
+                    ConnectionTest(ok = true, message = parts.joinToString(" "), url = url, key = useKey)
                 } catch (f: GemmaFailure) {
                     log("connection test failed: ${f.javaClass.simpleName}" + if (f is GemmaFailure.Unreachable) " (${f.detail})" else "")
                     ConnectionTest(message = f.userMessage())
                 }
             }
-            _test.value = result
+            // An address and key that just worked are kept straight away: nothing more to press, nothing lost on Back.
+            if (result.ok && result.url != null) {
+                val problem = saveSettings(result.url, result.key ?: "")
+                _test.value = (if (problem == null) result.copy(message = result.message + " Saved.") else result.copy(message = result.message + " " + problem)).copy(key = null)
+            } else _test.value = result
         }
     }
 
-    /** Save the settings and connect. Returns a sentence if the address is not usable. */
+    /** Save the settings and connect. Returns a sentence if the address or key could not be kept. */
     fun saveSettings(address: String, key: String): String? {
         val checked = ServerAddress.check(address)
         if (checked is ServerAddress.Check.Bad) return checked.reason
         val url = (checked as ServerAddress.Check.Ok).url
-        storage.serverAddress = url
         val cleaned = cleanKey(key)
         if (cleaned.isNotBlank()) {
-            storage.accessKey = cleaned
+            if (!storage.saveAccessKey(cleaned)) return "This phone couldn't store the access key securely. Try again, or restart the phone."
             accessKey = cleaned
         }
+        storage.serverAddress = url
+        if (storage.serverAddress != url) return "The address couldn't be saved on this phone."
         log("settings saved (${if (checked.cleartext) "http" else "https"})")
         controller.configure(url) { accessKey }
         controller.connect()
@@ -302,17 +327,129 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
     fun send() {
         val text = _draft.value
         val sending = _pictures.value
-        val accepted = controller.send(text, images = sending.map { it.dataUrl }) { returned ->
-            // The server never received it: put the words back so nothing is lost.
+        val files = _files2.value
+        if (files.any { !it.ready && it.error == null }) {
+            controller.notice("Wait for the files to finish uploading.")
+            return
+        }
+        val good = files.filter { it.ready }
+        val documents = good.filter { it.document && it.dataUrl != null }.map { gemma.core.DocumentUpload(it.name, it.mime, it.dataUrl!!) }
+        val uploaded = good.mapNotNull { it.artifactId }
+        val accepted = controller.send(
+            text, images = sending.map { it.dataUrl }, documents = documents, artifactIds = uploaded, fileNames = good.map { it.name },
+        ) { returned ->
+            // The server never received it: put the words and attachments back so nothing is lost.
             onMain {
                 if (_draft.value.isBlank()) _draft.value = returned
                 if (_pictures.value.isEmpty()) _pictures.value = sending
+                if (_files2.value.isEmpty()) _files2.value = files
             }
         }
         if (accepted) {
             _draft.value = ""
             _pictures.value = emptyList()
+            _files2.value = emptyList()
             startedTurn()
+        }
+    }
+
+    // ---- files Glen attaches ----------------------------------------------------------------
+
+    private var fileSeq = 0L
+    private val documentTypes = mapOf(
+        "pdf" to "application/pdf", "txt" to "text/plain",
+        "docx" to "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    /** Any file from the phone's own picker: PDFs, Word and text files are read by Vision as documents; anything else (code, ZIPs, audio) is uploaded. */
+    fun addFile(uri: Uri) {
+        if (_files2.value.size >= 10) {
+            controller.notice("Up to 10 files can go with one message.")
+            return
+        }
+        val app = getApplication<Application>()
+        val (name, size) = Phone.nameAndSize(app, uri)
+        val ext = name.substringAfterLast('.', "").lowercase()
+        val mime = documentTypes[ext]
+        val limitDoc = 50_000_000L
+        val id = ++fileSeq
+        val doc = mime != null && size in 1..limitDoc
+        _files2.update { it + PendingFile(id, name, size, document = doc, mime = mime ?: "") }
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) { Phone.readAll(app, uri, 200_000_000) }
+            if (bytes == null) {
+                updateFile(id) { it.copy(error = "couldn't be read (or over 200 MB)") }
+                return@launch
+            }
+            if (doc) {
+                val data = withContext(Dispatchers.Default) { "data:$mime;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP) }
+                updateFile(id) { it.copy(ready = true, progress = 1.0, dataUrl = data, size = bytes.size.toLong()) }
+                return@launch
+            }
+            val api = controller.server ?: run { updateFile(id) { it.copy(error = "Vision isn't set up") }; return@launch }
+            val cid = chat.value.conversationId
+            try {
+                val art = withContext(Dispatchers.IO) {
+                    api.upload(bytes, name, cid) { f -> updateFile(id) { it.copy(progress = f) } }
+                }
+                updateFile(id) { it.copy(ready = true, progress = 1.0, artifactId = art.id, size = art.size) }
+                log("file uploaded (${art.size} bytes)")
+            } catch (f: GemmaFailure) {
+                updateFile(id) { it.copy(error = explain(f)) }
+            }
+        }
+    }
+
+    private fun updateFile(id: Long, change: (PendingFile) -> PendingFile) =
+        _files2.update { list -> list.map { if (it.id == id) change(it) else it } }
+
+    fun removeFile(id: Long) = _files2.update { list -> list.filterNot { it.id == id } }
+
+    // ---- files, tasks and approvals in the conversation -------------------------------------
+
+    fun decide(approvalId: String, allow: Boolean, always: Boolean = false) = controller.decide(approvalId, allow, always)
+    fun cancelJob(id: String) = controller.cancelJob(id)
+
+    /** Open a file from Vision: text and code are shown here; anything else is saved and handed to an app that can open it. */
+    fun openArtifact(a: gemma.core.Artifact) {
+        if (a.text || a.language != null) {
+            _viewer.value = ViewerUi(a)
+            ask({ e -> _viewer.update { it?.copy(loading = false, error = e) } }, { it.fetchBytes(a.url, 4_000_000) }) { bytes ->
+                _viewer.update { it?.copy(loading = false, text = bytes.toString(Charsets.UTF_8)) }
+            }
+        } else saveArtifact(a, open = true)
+    }
+
+    /** Put a starting sentence in the message box for Glen to finish (nothing is sent). */
+    fun draftAbout(text: String) {
+        _draft.value = text
+    }
+
+    fun editPictureDraft(a: gemma.core.Artifact) = draftAbout("Edit the picture ${a.filename} (${a.id}): ")
+
+    fun closeViewer() {
+        _viewer.value = null
+    }
+
+    /** Save to the phone's Downloads folder (and, with `open`, open it in another app). */
+    fun saveArtifact(a: gemma.core.Artifact, open: Boolean = false) {
+        val app = getApplication<Application>()
+        ask({ controller.notice(it) }, { it.fetchBytes(a.url, 200_000_000) }) { bytes ->
+            viewModelScope.launch {
+                val uri = withContext(Dispatchers.IO) { Phone.saveToDownloads(app, a.filename, a.mime, bytes) }
+                if (uri == null) controller.notice("${a.filename} couldn't be saved on this phone.")
+                else if (open) Phone.openWith(app, uri, a.mime).let { opened -> if (!opened) controller.notice("Saved ${a.filename} to Downloads. No app here opens that kind of file.") }
+                else controller.notice("Saved ${a.filename} to Downloads.")
+            }
+        }
+    }
+
+    /** Text of a code block, saved as a file. */
+    fun saveCode(filename: String, code: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val uri = withContext(Dispatchers.IO) { Phone.saveToDownloads(app, filename, "text/plain", code.toByteArray()) }
+            controller.notice(if (uri == null) "That couldn't be saved." else "Saved $filename to Downloads.")
         }
     }
 
@@ -428,7 +565,10 @@ class GemmaViewModel(app: Application) : AndroidViewModel(app) {
         if (intent?.action != Intent.ACTION_SEND) return false
         intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }?.let { addToDraft(it.take(8000)) }
         @Suppress("DEPRECATION")
-        (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { addPicture(it) }
+        (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { uri ->
+            val type = intent.type ?: getApplication<Application>().contentResolver.getType(uri) ?: ""
+            if (type.startsWith("image/")) addPicture(uri) else addFile(uri)
+        }
         return true
     }
 

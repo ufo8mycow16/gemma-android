@@ -111,6 +111,7 @@ class ChatController(
                 api.messages(conversation.id, limit = 60)
             }
             dispatch(ChatAction.HistoryLoaded(conversation, page))
+            watchJobs()
             log("connected: api v${status.apiVersion}, model ${if (status.modelReady) "ready" else "unavailable"}, " +
                 "voice ${if (status.voiceReady) "ready" else "unavailable"}, ${page.messages.size} messages")
             true
@@ -125,6 +126,7 @@ class ChatController(
         val id = state.value.conversationId ?: return
         try {
             val page = api.messages(id, limit = 60)
+            if (state.value.conversationId != id) return
             dispatch(ChatAction.HistoryLoaded(Conversation(id, state.value.conversationTitle, true), page))
         } catch (f: GemmaFailure) {
             onFailure(f, "reload")
@@ -149,17 +151,24 @@ class ChatController(
      * `onReturned` is called with the text if the server certainly never received it,
      * so the app can put it back in the input box.
      */
-    fun send(text: String, images: List<String> = emptyList(), source: String = "text", onReturned: (String) -> Unit = {}): Boolean {
+    fun send(
+        text: String, images: List<String> = emptyList(), source: String = "text",
+        documents: List<DocumentUpload> = emptyList(), artifactIds: List<String> = emptyList(), fileNames: List<String> = emptyList(),
+        onReturned: (String) -> Unit = {},
+    ): Boolean {
         val api = api ?: return false
         val s = state.value
         val conversationId = s.conversationId ?: return false
-        val message = text.trim()
-        if (s.busy || (message.isEmpty() && images.isEmpty())) return false
+        val typed = text.trim()
+        val attached = images.isNotEmpty() || documents.isNotEmpty() || artifactIds.isNotEmpty()
+        if (s.busy || (typed.isEmpty() && !attached)) return false
+        // Files on their own still need a few words for Gemma; Glen's bubble shows exactly what he typed.
+        val message = typed.ifEmpty { if (images.isNotEmpty() && documents.isEmpty() && artifactIds.isEmpty()) "Have a look at this." else "Here are the files." }
 
         val turnId = TurnIds.new()
         val thisCall = api.newCall(turnId)
         call = thisCall
-        dispatch(ChatAction.SendStarted(turnId, message, images.size))
+        dispatch(ChatAction.SendStarted(turnId, typed, images.size, fileNames))
         log("turn $turnId: sending (${message.length} chars)")
 
         scope.launch(io) {
@@ -168,6 +177,7 @@ class ChatController(
                 val last = api.streamTurn(
                     conversationId, thisCall, message, voice = voice, client = clientInfo(), images = images,
                     voiceStyle = if (voice) voiceStyle() else null, source = source,
+                    documents = documents, artifactIds = artifactIds,
                 ) { event ->
                     if (event !is TurnEvent.Ping && event !is TurnEvent.Delta) log("turn $turnId: ${event.javaClass.simpleName}")
                     dispatch(ChatAction.Event(turnId, event))
@@ -187,6 +197,7 @@ class ChatController(
                     _state.update { it.copy(modelReady = false) }
                 }
                 reloadHistory()      // swap the in-progress bubbles for the stored messages
+                watchJobs()
             } catch (f: GemmaFailure.Interrupted) {
                 log("turn $turnId: connection dropped mid-turn (${f.detail})")
                 speechListener?.invoke(turnId, TurnEvent.SpeechDone(cancelled = true))
@@ -195,7 +206,7 @@ class ChatController(
                 // Nothing reached the server: give the text back rather than leave a message that was never sent.
                 onFailure(f, "turn $turnId")
                 dispatch(ChatAction.TurnLost(turnId, userProblem = null, notice = f.userMessage() + " Your message wasn't sent.", sent = false))
-                onReturned(message)
+                onReturned(typed)
             } finally {
                 if (call === thisCall) call = null
             }
@@ -251,6 +262,71 @@ class ChatController(
                 api.stopTurn(id)
             } catch (f: GemmaFailure) {
                 log("speech $id: stop could not be delivered (${f.javaClass.simpleName})")
+            }
+        }
+    }
+
+    // ---- background tasks and approvals ---------------------------------------------------
+
+    @Volatile private var jobWatcher: Job? = null
+
+    /**
+     * Follow running tasks in this conversation. The percentage shown is the server's own, read about once a
+     * second; when a task finishes the conversation is reloaded so its result (a picture, a file) appears.
+     */
+    fun watchJobs() {
+        if (jobWatcher?.isActive == true) return
+        if (state.value.runningJobs.isEmpty()) return
+        jobWatcher = scope.launch(io) {
+            var misses = 0
+            while (true) {
+                val api = api ?: break
+                val running = state.value.runningJobs
+                if (running.isEmpty()) break
+                var finished = false
+                for (j in running) {
+                    try {
+                        val fresh = api.job(j.id)
+                        misses = 0
+                        if (fresh != j) dispatch(ChatAction.JobUpdated(fresh))
+                        if (fresh.finished) {
+                            finished = true
+                            log("task ${j.id}: ${fresh.state}")
+                        }
+                    } catch (f: GemmaFailure) {
+                        misses++
+                    }
+                }
+                if (finished && !state.value.busy) reloadHistory()
+                if (misses > 60) break                  // Vision has been unreachable for a while; connect() starts this again
+                delay(if (misses > 0) 3000 else 1000)
+            }
+        }
+    }
+
+    fun cancelJob(id: String) {
+        val api = api ?: return
+        scope.launch(io) {
+            try {
+                api.cancelJob(id)
+                dispatch(ChatAction.JobUpdated(api.job(id)))
+            } catch (f: GemmaFailure) {
+                onFailure(f, "cancel task")
+            }
+        }
+    }
+
+    /** Allow once / always, or cancel. The server runs an allowed action exactly once, however often this is pressed. */
+    fun decide(approvalId: String, allow: Boolean, always: Boolean = false) {
+        val api = api ?: return
+        scope.launch(io) {
+            try {
+                val result = api.decide(approvalId, allow, always)
+                dispatch(ChatAction.ApprovalUpdated(result))
+                log("approval $approvalId: ${result.state}")
+                if (result.state == "failed") notice("That didn't work: " + (result.resultError ?: "the action failed on Vision."))
+            } catch (f: GemmaFailure) {
+                onFailure(f, "approval")
             }
         }
     }

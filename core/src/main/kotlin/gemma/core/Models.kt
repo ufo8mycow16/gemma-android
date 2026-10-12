@@ -80,3 +80,77 @@ internal fun fileSearch(o: JsonObject) = FileSearch(
     }.filter { it.path.isNotEmpty() },
     truncated = o.bool("truncated") ?: false,
 )
+
+// ---- files, background tasks and approvals (server API v2) ----------------------------
+
+/** A file on Vision: one Glen attached, or one Gemma (or Claude Code, or a build) made. */
+data class Artifact(
+    val id: String, val kind: String, val filename: String, val mime: String, val size: Long,
+    val url: String, val createdBy: String, val description: String, val createdAt: String,
+    val language: String? = null, val text: Boolean = false, val prompt: String? = null,
+) {
+    val isImage: Boolean get() = kind == "image" || mime.startsWith("image/")
+}
+
+/** A background task (a picture, Claude Code, a specialist). `progress` is the server's own fraction, or null when unknown. */
+data class Job(
+    val id: String, val kind: String, val title: String, val state: String, val progress: Double?,
+    val progressText: String, val error: String?, val resultArtifactId: String?, val summary: String?,
+    val workspace: String?, val filesChanged: List<String> = emptyList(), val cancelRequested: Boolean = false,
+) {
+    val running: Boolean get() = state == "queued" || state == "running"
+    val finished: Boolean get() = !running
+    /** A whole-number percentage only when the server reports real progress for a running task. */
+    val percent: Int? get() = progress?.takeIf { state == "running" && !progressText.startsWith("Loading") && !progressText.startsWith("Queued") }
+        ?.let { (it * 100).toInt().coerceIn(0, 100) }
+}
+
+/** Something Gemma wants to do outside herself, waiting for Glen's OK. */
+data class Approval(
+    val id: String, val title: String, val plugin: String, val tool: String, val state: String,
+    val risk: String, val fields: List<Pair<String, String>>, val body: String, val resultError: String?,
+) {
+    val pending: Boolean get() = state == "pending"
+}
+
+/** Real progress of a document being read, from the server's own counters. */
+data class DocProgress(val name: String, val stage: String, val label: String, val percent: Int?, val done: Int?, val total: Int?)
+
+internal fun artifact(o: JsonObject): Artifact? {
+    val id = o.str("id") ?: return null
+    return Artifact(
+        id = id, kind = o.str("kind") ?: "file", filename = o.str("filename") ?: "file", mime = o.str("mime") ?: "",
+        size = o.long("size") ?: 0, url = o.str("url") ?: "/api/v1/artifacts/$id/content", createdBy = o.str("created_by") ?: "",
+        description = o.str("description") ?: "", createdAt = o.str("created_at") ?: "", language = o.str("language"),
+        text = o.bool("text") ?: false, prompt = o.obj("provenance")?.str("prompt"),
+    )
+}
+
+internal fun job(o: JsonObject): Job? {
+    val id = o.str("id") ?: return null
+    val r = o.obj("result")
+    return Job(
+        id = id, kind = o.str("kind") ?: "", title = o.str("title") ?: "Task", state = o.str("state") ?: "queued",
+        progress = o.double("progress"), progressText = o.str("progress_text") ?: "", error = o.str("error"),
+        resultArtifactId = r?.str("artifact_id"), summary = r?.str("summary")?.takeIf { it.isNotBlank() }, workspace = r?.str("workspace"),
+        filesChanged = (r?.get("files_changed") as? JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: emptyList(),
+        cancelRequested = o.bool("cancel_requested") ?: false,
+    )
+}
+
+internal fun approval(o: JsonObject): Approval? {
+    val id = o.str("id") ?: return null
+    val p = o.obj("preview")
+    val fields = (p?.get("fields") as? JsonArray)?.mapNotNull { f ->
+        val pair = f as? JsonArray ?: return@mapNotNull null
+        if (pair.size < 2) null else pair[0].toString().trim('"') to (pair[1] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+    } ?: emptyList()
+    val res = o.obj("result")
+    val err = res?.get("error")?.let { e -> (e as? JsonObject)?.str("message") ?: (e as? kotlinx.serialization.json.JsonPrimitive)?.content }
+    return Approval(id, p?.str("title") ?: o.str("title") ?: "Action", o.str("plugin") ?: "", o.str("tool") ?: "",
+        o.str("state") ?: "pending", p?.str("risk") ?: "medium", fields, p?.str("body") ?: "", err)
+}
+
+internal fun JsonObject.artifacts(key: String = "artifacts") = list(key).mapNotNull(::artifact)
+internal fun JsonObject.jobs(key: String = "jobs") = list(key).mapNotNull(::job)
+internal fun JsonObject.approvals(key: String = "approvals") = list(key).mapNotNull(::approval)

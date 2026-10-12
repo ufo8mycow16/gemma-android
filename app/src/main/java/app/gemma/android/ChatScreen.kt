@@ -69,8 +69,16 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.text.style.TextOverflow
 import gemma.core.ChatMessage
 import gemma.core.ChatState
+import gemma.core.DocProgress
+import gemma.core.RelativeTime
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -92,59 +100,103 @@ fun ChatScreen(viewModel: GemmaViewModel) {
     val voice by viewModel.voice.collectAsStateWithLifecycle()
     val speaking by viewModel.speaking.collectAsStateWithLifecycle()
     val pictures by viewModel.pictures.collectAsStateWithLifecycle()
+    val files by viewModel.attachments.collectAsStateWithLifecycle()
+    val viewer by viewModel.viewer.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
-    // Keep the newest text in view while Gemma is writing and when a message is added.
-    val last = state.messages.lastOrNull()
-    LaunchedEffect(state.messages.size, last?.text?.length, state.conversationId) {
-        if (state.messages.isNotEmpty()) listState.scrollToItem(state.messages.size - 1 + if (state.hasOlder) 1 else 0, Int.MAX_VALUE / 2)
+    // Relative times ("About 5 mins ago") are refreshed every 30 seconds, as on the web page.
+    val tick by produceState(0L) { while (true) { delay(30_000); value++ } }
+
+    // Follow new text only while Glen is at the bottom. If he has scrolled up to read, nothing moves;
+    // the arrow button appears instead (with a dot when something new has arrived below).
+    var follow by remember { mutableStateOf(true) }
+    var newBelow by remember { mutableStateOf(false) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (dragging, more) ->
+            if (dragging) follow = !more
+            if (!more) { follow = true; newBelow = false }
+        }
     }
+    val last = state.messages.lastOrNull()
+    val itemCount = state.messages.size + (if (state.hasOlder) 1 else 0)
+    val contentKey = listOf(state.messages.size, last?.text?.length, last?.artifacts?.size, last?.jobs?.size, last?.approvals?.size, state.docProgress?.percent)
+    LaunchedEffect(contentKey) {
+        if (state.messages.isEmpty()) return@LaunchedEffect
+        if (follow) listState.scrollToItem(itemCount - 1, Int.MAX_VALUE / 2) else newBelow = true
+    }
+    LaunchedEffect(state.conversationId) { follow = true; newBelow = false }
 
     Box(Modifier.fillMaxSize()) {
         // Her picture sits behind the conversation: clear while the chat is empty, faint once it has messages.
         Portrait(Modifier.fillMaxSize(), strength = if (state.messages.isEmpty()) 0.95f else 0.16f)
 
         Column(Modifier.fillMaxSize().imePadding()) {
-            if (state.messages.isEmpty()) {
-                Box(Modifier.weight(1f).fillMaxWidth().padding(16.dp), contentAlignment = Alignment.BottomStart) {
-                    Surface(shape = RoundedCornerShape(18.dp), color = Color(0xCC0C1322)) {
-                        Text(
-                            if (state.conversationId == null) state.statusLine else "No messages yet.",
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                            color = Space.Text,
-                        )
-                    }
-                }
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (prefs.compact) 6.dp else 12.dp),
-                ) {
-                    if (state.hasOlder) {
-                        item(key = "older") {
-                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                TextButton(onClick = { viewModel.loadOlder() }) { Text("Show earlier messages") }
-                            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (state.messages.isEmpty()) {
+                    Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.BottomStart) {
+                        Surface(shape = RoundedCornerShape(18.dp), color = Color(0xCC0C1322)) {
+                            Text(
+                                if (state.conversationId == null) state.statusLine else "No messages yet.",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                color = Space.Text,
+                            )
                         }
                     }
-                    items(state.messages, key = { it.key }) { message ->
-                        MessageBubble(
-                            message, viewModel, compact = prefs.compact,
-                            canPlay = prefs.voiceOutput && state.voiceReady,
-                            playing = voice.playingKey == message.key,
-                        )
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().testTag("messages"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(if (prefs.compact) 6.dp else 12.dp),
+                    ) {
+                        if (state.hasOlder) {
+                            item(key = "older") {
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                    TextButton(onClick = { viewModel.loadOlder() }) { Text("Show earlier messages") }
+                                }
+                            }
+                        }
+                        items(state.messages, key = { it.key }) { message ->
+                            val isLastReply = message === last && message.role != "user"
+                            MessageBubble(
+                                message, viewModel, compact = prefs.compact,
+                                canPlay = prefs.voiceOutput && state.voiceReady,
+                                playing = voice.playingKey == message.key,
+                                tick = tick,
+                                doc = if (isLastReply) state.docProgress else null,
+                                docOutcome = if (isLastReply) state.docOutcome else null,
+                            )
+                        }
+                    }
+                }
+                if (!follow && state.messages.isNotEmpty()) {
+                    Box(
+                        Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).size(44.dp).clip(RoundedCornerShape(22.dp))
+                            .background(Space.Raised).border(1.dp, Space.Line, RoundedCornerShape(22.dp))
+                            .clickable {
+                                scope.launch { listState.animateScrollToItem(itemCount - 1, Int.MAX_VALUE / 2) }
+                                follow = true; newBelow = false
+                            }
+                            .testTag("jump"),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Glyph.ArrowDown, contentDescription = "Jump to the latest message", tint = Space.Text, modifier = Modifier.size(22.dp))
+                        if (newBelow) Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(9.dp).clip(RoundedCornerShape(5.dp)).background(Space.Blue))
                     }
                 }
             }
-            Composer(state, draft, viewModel, voice, pictures, speakingNow = speaking != null && !voice.live)
+            Composer(state, draft, viewModel, voice, pictures, files, speakingNow = speaking != null && !voice.live, onSent = { follow = true })
         }
     }
+    viewer?.let { ArtifactViewer(it, viewModel) }
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, viewModel: GemmaViewModel, compact: Boolean, canPlay: Boolean, playing: Boolean) {
+private fun MessageBubble(
+    message: ChatMessage, viewModel: GemmaViewModel, compact: Boolean, canPlay: Boolean, playing: Boolean,
+    tick: Long, doc: DocProgress?, docOutcome: String?,
+) {
     val mine = message.role == "user"
     val speaker = if (mine) "Glen" else "Gemma"
     var showLog by rememberSaveable(message.key) { mutableStateOf(false) }
@@ -156,8 +208,11 @@ private fun MessageBubble(message: ChatMessage, viewModel: GemmaViewModel, compa
             Avatar(if (compact) 28.dp else 34.dp)
             Spacer(Modifier.width(8.dp))
         }
-        Column(horizontalAlignment = if (mine) Alignment.End else Alignment.Start, modifier = Modifier.weight(1f, fill = false)) {
-            Surface(
+        Column(horizontalAlignment = if (mine) Alignment.End else Alignment.Start, modifier = Modifier.weight(1f, fill = false),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            val showBubble = message.text.isNotEmpty() || message.streaming || message.attachments.isNotEmpty() ||
+                message.pendingImages > 0 || message.pendingFiles.isNotEmpty()
+            if (showBubble) Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = if (mine) Color(0xE61F3F86) else Color(0xE6131C31),
                 modifier = Modifier
@@ -166,6 +221,9 @@ private fun MessageBubble(message: ChatMessage, viewModel: GemmaViewModel, compa
             ) {
                 Column(Modifier.padding(horizontal = pad + 2.dp, vertical = pad - 2.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     message.attachments.forEach { path -> ServerPicture(viewModel, path) }
+                    if (message.pendingFiles.isNotEmpty()) {
+                        Text("📎 " + message.pendingFiles.joinToString(", "), style = MaterialTheme.typography.labelSmall, color = Space.Muted)
+                    }
                     if (message.pendingImages > 0) {
                         Text(
                             if (message.pendingImages == 1) "1 picture attached" else "${message.pendingImages} pictures attached",
@@ -177,19 +235,26 @@ private fun MessageBubble(message: ChatMessage, viewModel: GemmaViewModel, compa
                             // Nothing has arrived yet: show that a reply is on its way.
                             Text("…", color = Space.Text, style = MaterialTheme.typography.bodyLarge)
                         } else if (message.text.isNotEmpty()) {
-                            MarkdownText(message.text, Space.Text)
+                            if (mine) Text(message.text, color = Space.Text, style = MaterialTheme.typography.bodyLarge)
+                            else MarkdownText(message.text, Space.Text, onSaveCode = { name, code -> viewModel.saveCode(name, code) })
                         }
                     }
                 }
             }
+            if (doc != null) DocumentCard(doc, docOutcome)
+            message.artifacts.forEach { ArtifactCard(it, viewModel) }
+            message.jobs.forEach { JobCard(it, viewModel) }
+            message.approvals.forEach { ApprovalCard(it, viewModel) }
             if (message.stopped) Text("Stopped", style = MaterialTheme.typography.labelSmall, color = Space.Muted)
             message.problem?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
 
             if (!message.streaming) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val time = shortTime(message.createdAt)
+                    // The same relative time on Glen's messages and on Gemma's ("Just now", "About 5 mins ago").
+                    val time = remember(message.createdAt, tick) { RelativeTime.of(message.createdAt) }
                     if (time.isNotEmpty()) {
-                        Text(time, style = MaterialTheme.typography.labelSmall, color = Space.Muted, modifier = Modifier.padding(horizontal = 6.dp))
+                        Text(time, style = MaterialTheme.typography.labelSmall, color = Space.Muted,
+                            modifier = Modifier.padding(horizontal = 6.dp).testTag(if (mine) "time-mine" else "time-hers"))
                     }
                     if (message.text.isNotEmpty()) {
                         IconButton(onClick = { clipboard.setText(AnnotatedString(message.text)) }, modifier = Modifier.size(34.dp)) {
@@ -242,7 +307,7 @@ private fun ServerPicture(viewModel: GemmaViewModel, path: String) {
 @Composable
 private fun Composer(
     state: ChatState, draft: String, viewModel: GemmaViewModel, voice: VoiceUi,
-    pictures: List<Picture>, speakingNow: Boolean,
+    pictures: List<Picture>, files: List<PendingFile>, speakingNow: Boolean, onSent: () -> Unit,
 ) {
     val context = LocalContext.current
     var menu by remember { mutableStateOf(false) }
@@ -254,6 +319,9 @@ private fun Composer(
     val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = photoUri
         if (saved && uri != null) viewModel.addPicture(uri)
+    }
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        uris.forEach { viewModel.addFile(it) }
     }
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) viewModel.dictate()
@@ -312,10 +380,38 @@ private fun Composer(
                     }
                 }
             }
+            if (files.isNotEmpty()) {
+                Column(Modifier.padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    files.forEach { f ->
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Space.Raised).padding(start = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                                Text(f.name, color = Space.Text, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                                val line = when {
+                                    f.error != null -> f.error
+                                    !f.ready && f.document -> "Reading…"
+                                    !f.ready -> "Uploading ${(f.progress * 100).toInt()}%"
+                                    f.document -> "${sizeText(f.size)} · Gemma reads it when you send"
+                                    else -> "${sizeText(f.size)} · uploaded"
+                                }
+                                Text(line, style = MaterialTheme.typography.labelSmall, color = if (f.error != null) MaterialTheme.colorScheme.error else Space.Muted)
+                                if (!f.ready && f.error == null && !f.document) {
+                                    LinearProgressIndicator(progress = { f.progress.toFloat() }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                                }
+                            }
+                            IconButton(onClick = { viewModel.removeFile(f.id) }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Remove ${f.name}", tint = Space.Muted, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            }
             Row(verticalAlignment = Alignment.Bottom) {
                 Box {
                     IconButton(onClick = { menu = true }, modifier = Modifier.height(56.dp)) {
-                        Icon(Icons.Filled.Add, contentDescription = "Add a picture", tint = Space.Muted)
+                        Icon(Icons.Filled.Add, contentDescription = "Add a picture or file", tint = Space.Muted)
                     }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(
@@ -324,6 +420,14 @@ private fun Composer(
                             onClick = {
                                 menu = false
                                 pickPicture.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Attach a file") },
+                            leadingIcon = { Icon(Glyph.Attach, contentDescription = null) },
+                            onClick = {
+                                menu = false
+                                pickFiles.launch(arrayOf("*/*"))
                             },
                         )
                         DropdownMenuItem(
@@ -374,9 +478,10 @@ private fun Composer(
                         colors = ButtonDefaults.buttonColors(containerColor = Space.Red),
                     ) { Text(if (state.stopping) "Stopping" else "Stop") }
                 } else {
+                    val uploading = files.any { !it.ready && it.error == null }
                     Button(
-                        onClick = { viewModel.send() },
-                        enabled = (draft.isNotBlank() || pictures.isNotEmpty()) && state.conversationId != null,
+                        onClick = { viewModel.send(); onSent() },
+                        enabled = !uploading && (draft.isNotBlank() || pictures.isNotEmpty() || files.any { it.ready }) && state.conversationId != null,
                         modifier = Modifier.padding(start = 8.dp).heightIn(min = 56.dp),
                     ) { Text("Send") }
                 }

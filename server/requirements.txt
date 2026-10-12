@@ -1,0 +1,22 @@
+# Gemma's server on Vision. Install into Gemma's own virtual environment:
+#   source ~/gemma/venv/bin/activate     (or wherever your venv is)
+#   pip install -r requirements.txt
+# Nothing here touches Torch, CUDA or the NVIDIA driver.
+
+# Needed
+flask>=3.0
+requests>=2.31
+beautifulsoup4>=4.12
+pypdf>=4.0
+python-docx>=1.1
+
+# Files Gemma makes (Excel, PowerPoint, nicer PDFs). Without them she says so and offers another format.
+openpyxl>=3.1
+python-pptx>=0.6.23
+reportlab>=4.0
+
+# Running Python tests in a workspace (workspace "pytest" action)
+pytest>=8.0
+
+# Transcription (phone Tools tab, web dictation). Optional; it downloads a speech model on first use.
+faster-whisper>=1.0

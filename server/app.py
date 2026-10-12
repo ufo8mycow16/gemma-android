@@ -6729,7 +6729,11 @@ def process_turn(cid, user_text, client=None, source="text", turn_id=None,
             art = gartifacts.save(data, f"picture-{user_message_id}.{_IMAGE_KINDS[mime][1]}", created_by="user",
                                   conversation_id=cid, message_id=user_message_id, kind="image", provenance={"source": "chat upload"})
             image_artifact_ids.append(art["id"])
-        for name, data in files or []:
+        for name, data, existing in files or []:
+            if existing:
+                gartifacts.attach_to_message([existing], user_message_id, cid)
+                file_artifacts.append(gartifacts.get(existing))
+                continue
             art = gartifacts.save(data, name, created_by="user", conversation_id=cid, message_id=user_message_id,
                                   provenance={"source": "chat upload"})
             file_artifacts.append(art)
@@ -7266,13 +7270,13 @@ def parse_files(raw, artifact_ids=None):
         except Exception:
             continue
         if 0 < len(data) <= MAX_INLINE_FILE_BYTES:
-            out.append((gartifacts.safe_filename(item.get("name") or "file"), data))
+            out.append((gartifacts.safe_filename(item.get("name") or "file"), data, None))
     for aid in (artifact_ids if isinstance(artifact_ids, list) else [])[:MAX_FILES_PER_TURN]:
         if isinstance(aid, str) and re.fullmatch(r"a[0-9a-f]{15}", aid):
             data = gartifacts.read(aid)
             meta = gartifacts.get(aid)
             if data is not None and meta and meta["created_by"] == "user":
-                out.append((meta["filename"], data))
+                out.append((meta["filename"], data, aid))      # already stored: attached, not copied
     return out
 
 

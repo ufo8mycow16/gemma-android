@@ -455,3 +455,78 @@ class VoiceService : Service() {
         }
     }
 }
+
+/** Files between the phone and Gemma, through Android's own pickers and Downloads; no storage permission is needed. */
+object Phone {
+    fun nameAndSize(context: Context, uri: Uri): Pair<String, Long> {
+        var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        var size = -1L
+        try {
+            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    c.getString(0)?.let { name = it }
+                    if (!c.isNull(1)) size = c.getLong(1)
+                }
+            }
+        } catch (e: Exception) {
+        }
+        return name to size
+    }
+
+    fun readAll(context: Context, uri: Uri, maxBytes: Long): ByteArray? = try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(65536)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                out.write(buffer, 0, n)
+                if (out.size() > maxBytes) return@use null
+            }
+            out.toByteArray()
+        }
+    } catch (e: Exception) {
+        null
+    } catch (e: OutOfMemoryError) {
+        null
+    }
+
+    private fun safeName(name: String) = name.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._ -]"), "_").ifBlank { "file" }.take(120)
+
+    /** Into the public Downloads folder (Android 10+), or the app's own Downloads folder on older phones. */
+    fun saveToDownloads(context: Context, filename: String, mime: String, bytes: ByteArray): Uri? = try {
+        val name = safeName(filename)
+        val type = mime.ifBlank { "application/octet-stream" }
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, type)
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/Gemma")
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw java.io.IOException("no entry")
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw java.io.IOException("no stream")
+            values.clear()
+            values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            uri
+        } else {
+            val dir = java.io.File(context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS), "Gemma").apply { mkdirs() }
+            val file = java.io.File(dir, name)
+            file.writeBytes(bytes)
+            androidx.core.content.FileProvider.getUriForFile(context, "app.gemma.android.files", file)
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    fun openWith(context: Context, uri: Uri, mime: String): Boolean = try {
+        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).setDataAndType(uri, mime.ifBlank { "*/*" })
+            .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        true
+    } catch (e: Exception) {
+        false
+    }
+}

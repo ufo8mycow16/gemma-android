@@ -29,6 +29,9 @@ data class Message(
     val researchLog: String?,
     val attachments: List<Attachment>,
     val createdAt: String,
+    val artifacts: List<Artifact> = emptyList(),
+    val jobs: List<Job> = emptyList(),
+    val approvals: List<Approval> = emptyList(),
 )
 
 data class HistoryPage(
@@ -49,6 +52,9 @@ data class ServerStatus(
     val capabilities: Map<String, String>,
     val maxImagesPerTurn: Int,
     val maxImageBytes: Long,
+    val maxDocumentBytes: Long = 0,
+    val maxUploadBytes: Long = 0,
+    val build: String = "",
 )
 
 data class TurnResult(
@@ -58,6 +64,11 @@ data class TurnResult(
     val stopped: Boolean,
     val duplicate: Boolean,
     val pendingCalendar: PendingCalendar? = null,
+    val messageId: Long? = null,
+    val userMessageId: Long? = null,
+    val artifacts: List<Artifact> = emptyList(),
+    val jobs: List<Job> = emptyList(),
+    val approvals: List<Approval> = emptyList(),
 )
 
 enum class TurnState { ACTIVE, DONE, STOPPED, FAILED, UNKNOWN }
@@ -67,7 +78,11 @@ data class TurnInfo(val turnId: String, val state: TurnState, val reply: String,
 /** Everything the server can say while a turn is in progress. */
 sealed class TurnEvent {
     data class Started(val turnId: String, val conversationId: Long, val apiVersion: Int) : TurnEvent()
-    data class Status(val stage: String, val label: String) : TurnEvent()
+    /** What Gemma is doing. Document work also carries the server's own counters (never a client-side guess). */
+    data class Status(
+        val stage: String, val label: String, val percent: Int? = null, val done: Int? = null, val total: Int? = null,
+        val docStage: String? = null, val docName: String? = null,
+    ) : TurnEvent()
     data class Delta(val text: String) : TurnEvent()
     /** Text shown so far was withdrawn (Gemma reached for a tool instead): discard it. */
     object Reset : TurnEvent()
@@ -139,6 +154,11 @@ internal fun turnResult(o: JsonObject, fallbackTurnId: String): TurnResult = Tur
     stopped = o.bool("stopped") ?: false,
     duplicate = o.bool("duplicate") ?: false,
     pendingCalendar = pendingCalendar(o),
+    messageId = o.long("message_id"),
+    userMessageId = o.long("user_message_id"),
+    artifacts = o.artifacts(),
+    jobs = o.jobs(),
+    approvals = o.approvals(),
 )
 
 object Events {
@@ -153,7 +173,8 @@ object Events {
         } ?: return null
         return when (val type = o.str("type") ?: return null) {
             "start" -> TurnEvent.Started(o.str("turn_id") ?: o.str("play_id") ?: turnId, o.long("conversation_id") ?: -1, o.int("api_version") ?: 0)
-            "status" -> TurnEvent.Status(o.str("stage") ?: "", o.str("label") ?: "")
+            "status" -> TurnEvent.Status(o.str("stage") ?: "", o.str("label") ?: "", o.int("percent"), o.int("done"), o.int("total"),
+                o.str("doc_stage"), o.str("doc_name"))
             "delta" -> TurnEvent.Delta(o.str("text") ?: "")
             "reset" -> TurnEvent.Reset
             "speech" -> TurnEvent.Speech(o.int("seq") ?: 0, o.str("url") ?: "", o.double("seconds") ?: 0.0)

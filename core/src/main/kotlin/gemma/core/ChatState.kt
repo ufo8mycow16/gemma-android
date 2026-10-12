@@ -25,6 +25,12 @@ data class ChatMessage(
     val attachments: List<String> = emptyList(),
     /** Pictures sent with a turn still in progress. */
     val pendingImages: Int = 0,
+    /** Files Gemma made or Glen attached, background tasks this message started, and actions waiting for Glen's OK. */
+    val artifacts: List<Artifact> = emptyList(),
+    val jobs: List<Job> = emptyList(),
+    val approvals: List<Approval> = emptyList(),
+    /** Names of files sent with a turn still in progress. */
+    val pendingFiles: List<String> = emptyList(),
 )
 
 data class ChatState(
@@ -42,7 +48,14 @@ data class ChatState(
     /** A short notice for the person, or null. */
     val notice: String? = null,
     val pendingCalendar: PendingCalendar? = null,
+    /** A document being read for the turn in progress, with the server's real counters. */
+    val docProgress: DocProgress? = null,
+    /** How the last document finished: "complete" or "failed"; shown until the next turn. */
+    val docOutcome: String? = null,
 ) {
+    /** Background tasks still running anywhere in the visible conversation. */
+    val runningJobs: List<Job> get() = messages.flatMap { it.jobs }.filter { it.running }
+
     val busy: Boolean get() = activeTurnId != null
 
     /** The small status line under the title. Never more than a few words. */
@@ -61,7 +74,11 @@ sealed class ChatAction {
     data class StatusKnown(val status: ServerStatus) : ChatAction()
     data class HistoryLoaded(val conversation: Conversation, val page: HistoryPage) : ChatAction()
     data class OlderLoaded(val page: HistoryPage) : ChatAction()
-    data class SendStarted(val turnId: String, val text: String, val images: Int = 0) : ChatAction()
+    data class SendStarted(val turnId: String, val text: String, val images: Int = 0, val files: List<String> = emptyList()) : ChatAction()
+    /** The latest state of a background task, from the server. */
+    data class JobUpdated(val job: Job) : ChatAction()
+    /** An approval was decided (here or on another device). */
+    data class ApprovalUpdated(val approval: Approval) : ChatAction()
     /** Another chat is about to be shown: clear this one off the screen. */
     object ConversationCleared : ChatAction()
     data class Event(val turnId: String, val event: TurnEvent) : ChatAction()
@@ -77,6 +94,10 @@ object ChatReducer {
     private fun Message.toChat() = ChatMessage(
         key = "m$id", role = role, text = text, researchLog = researchLog,
         id = id, createdAt = createdAt, attachments = attachments.map { it.url },
+        artifacts = artifacts,
+        // A finished picture is already on the message as a file; its task card would only repeat it.
+        jobs = jobs.filterNot { j -> j.state == "done" && j.resultArtifactId != null && artifacts.any { it.id == j.resultArtifactId } },
+        approvals = approvals,
     )
 
     fun reduce(s: ChatState, a: ChatAction): ChatState = when (a) {
@@ -111,8 +132,10 @@ object ChatReducer {
             activity = "Sending…",
             notice = null,
             pendingCalendar = null,
+            docProgress = null,
+            docOutcome = null,
             messages = s.messages +
-                ChatMessage("t${a.turnId}:u", "user", a.text, pendingImages = a.images) +
+                ChatMessage("t${a.turnId}:u", "user", a.text, pendingImages = a.images, pendingFiles = a.files, createdAt = nowStamp()) +
                 ChatMessage("t${a.turnId}:a", "assistant", "", streaming = true),
         )
 
@@ -139,6 +162,14 @@ object ChatReducer {
 
         ChatAction.NoticeDismissed -> s.copy(notice = null)
 
+        is ChatAction.JobUpdated -> s.copy(messages = s.messages.map { m ->
+            if (m.jobs.any { it.id == a.job.id }) m.copy(jobs = m.jobs.map { if (it.id == a.job.id) a.job else it }) else m
+        })
+
+        is ChatAction.ApprovalUpdated -> s.copy(messages = s.messages.map { m ->
+            if (m.approvals.any { it.id == a.approval.id }) m.copy(approvals = m.approvals.map { if (it.id == a.approval.id) a.approval else it }) else m
+        })
+
         ChatAction.ConversationCleared -> if (s.busy) s else s.copy(
             conversationId = null, conversationTitle = "", messages = emptyList(), hasOlder = false,
             activity = "", pendingCalendar = null,
@@ -150,18 +181,29 @@ object ChatReducer {
         fun reply(change: (ChatMessage) -> ChatMessage) = s.messages.map { if (it.key == key) change(it) else it }
         return when (e) {
             is TurnEvent.Started -> s.copy(activity = "Thinking…")
-            is TurnEvent.Status -> if (s.stopping) s else s.copy(activity = e.label.ifBlank { s.activity })
+            is TurnEvent.Status -> {
+                val doc = if (e.docStage != null || e.stage in DOC_STAGES) DocProgress(
+                    name = e.docName ?: s.docProgress?.name ?: "", stage = e.docStage ?: e.stage, label = e.label,
+                    percent = e.percent ?: s.docProgress?.percent, done = e.done ?: s.docProgress?.done, total = e.total ?: s.docProgress?.total,
+                ) else s.docProgress
+                if (s.stopping) s.copy(docProgress = doc) else s.copy(activity = e.label.ifBlank { s.activity }, docProgress = doc)
+            }
             is TurnEvent.Delta -> s.copy(messages = reply { it.copy(text = it.text + e.text) }, activity = if (s.stopping) s.activity else "")
             TurnEvent.Reset -> s.copy(messages = reply { it.copy(text = "") })
             is TurnEvent.Done -> {
                 val r = e.result
                 // The server's final text is authoritative, whatever arrived piece by piece.
-                val finished = reply { it.copy(text = r.reply, researchLog = r.researchLog, streaming = false, stopped = r.stopped) }
-                    .filterNot { it.key == key && it.text.isBlank() && !r.stopped }
-                s.copy(messages = finished, activeTurnId = null, stopping = false, activity = "", pendingCalendar = r.pendingCalendar)
+                val hasCards = r.artifacts.isNotEmpty() || r.jobs.isNotEmpty() || r.approvals.isNotEmpty()
+                val finished = reply {
+                    it.copy(text = r.reply, researchLog = r.researchLog, streaming = false, stopped = r.stopped, id = r.messageId ?: it.id,
+                        createdAt = it.createdAt.ifEmpty { nowStamp() }, artifacts = r.artifacts, jobs = r.jobs, approvals = r.approvals)
+                }.filterNot { it.key == key && it.text.isBlank() && !r.stopped && !hasCards }
+                s.copy(messages = finished, activeTurnId = null, stopping = false, activity = "", pendingCalendar = r.pendingCalendar,
+                    docOutcome = if (s.docProgress != null) "complete" else null)
             }
             is TurnEvent.Failed -> s.copy(
                 activeTurnId = null, stopping = false, activity = "", notice = e.failure.userMessage(),
+                docOutcome = if (s.docProgress != null) "failed" else null,
                 messages = s.messages.mapNotNull { m ->
                     when (m.key) {
                         "t$turnId:u" -> m.copy(problem = "Not answered")
@@ -176,6 +218,11 @@ object ChatReducer {
         }
     }
 }
+
+private val DOC_STAGES = setOf("reading", "chunking", "indexing", "analysing", "analysing_retry")
+
+/** Now, in the same ISO form the server uses, for a message shown before the server has stored it. */
+fun nowStamp(): String = java.time.OffsetDateTime.now().withNano(0).toString()
 
 /** Turn ids are chosen by the client so a message can never be answered twice by accident. */
 object TurnIds {
@@ -228,5 +275,37 @@ class SpeechQueue(private val play: (turnId: String, seq: Int, url: String) -> U
     /** Text was withdrawn mid-turn: pieces already queued are dropped, numbering carries on from the server. */
     @Synchronized fun reset(turn: String) {
         if (turn == turnId) waiting.clear()
+    }
+}
+
+/**
+ * "Just now", "About 5 mins ago", "Yesterday"…: the same wording and thresholds as the web page's
+ * relativeTime(), so a message reads the same on both. Empty when the stamp cannot be read.
+ */
+object RelativeTime {
+    fun of(stamp: String, nowMillis: Long = System.currentTimeMillis(), zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String {
+        if (stamp.isBlank()) return ""
+        val at = parse(stamp) ?: return ""
+        val sec = maxOf(0L, (nowMillis - at.toEpochMilli()) / 1000)
+        return when {
+            sec < 45 -> "Just now"
+            sec < 90 -> "About 1 min ago"
+            sec < 3600 -> "About ${Math.round(sec / 60.0)} mins ago"
+            sec < 5400 -> "About 1 hour ago"
+            sec < 86400 -> "About ${Math.round(sec / 3600.0)} hours ago"
+            sec < 172800 -> "Yesterday"
+            else -> at.atZone(zone).toLocalDate().format(java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.SHORT))
+        }
+    }
+
+    /** The server writes ISO times with an offset; older rows may lack one (taken as UTC). */
+    fun parse(stamp: String): java.time.Instant? = try {
+        java.time.OffsetDateTime.parse(stamp).toInstant()
+    } catch (e: Exception) {
+        try {
+            java.time.LocalDateTime.parse(stamp.replace(' ', 'T')).toInstant(java.time.ZoneOffset.UTC)
+        } catch (e2: Exception) {
+            null
+        }
     }
 }

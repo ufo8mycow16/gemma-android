@@ -15,8 +15,11 @@ import javax.crypto.spec.GCMParameterSpec
 data class Prefs(
     /** Her voice is available at all (play buttons, spoken replies). */
     val voiceOutput: Boolean = true,
-    /** Replies are spoken as they arrive, without pressing play. */
-    val autoPlay: Boolean = true,
+    /**
+     * Typed replies are spoken as they arrive, without pressing play. Off unless Glen turns it on:
+     * ordinary text chat stays quiet; live voice mode always speaks.
+     */
+    val autoPlay: Boolean = false,
     /** "plain", "balanced" or "expressive": how much performance Vision adds to her delivery. */
     val style: String = "balanced",
     val speed: Float = 1.0f,
@@ -37,22 +40,38 @@ data class Prefs(
 class Storage(context: Context) {
     private val prefsFile = context.applicationContext.getSharedPreferences("gemma", Context.MODE_PRIVATE)
 
+    /*
+     * Where Vision is and the key are written synchronously (commit), so they are on disk before the
+     * screen says "saved" and survive the app being closed or killed straight away.
+     */
     var serverAddress: String
         get() = prefsFile.getString("server_address", "") ?: ""
-        set(value) = prefsFile.edit().putString("server_address", value).apply()
+        set(value) {
+            prefsFile.edit().putString("server_address", value).commit()
+        }
 
     var accessKey: String
         get() = decrypt(prefsFile.getString("access_key_enc", null)) ?: ""
         set(value) {
-            val editor = prefsFile.edit()
-            if (value.isBlank()) editor.remove("access_key_enc") else editor.putString("access_key_enc", encrypt(value))
-            editor.apply()
+            saveAccessKey(value)
         }
+
+    /** Store the key encrypted. Returns false (and keeps the old one) if the phone's keystore refused. */
+    fun saveAccessKey(value: String): Boolean {
+        if (value.isBlank()) return prefsFile.edit().remove("access_key_enc").commit()
+        val sealed = encrypt(value) ?: return false     // never replace a working key with nothing
+        if (decrypt(sealed) != value) return false       // read it back before trusting it
+        return prefsFile.edit().putString("access_key_enc", sealed).commit()
+    }
+
+    /** A key is stored but this phone can no longer read it (its keystore entry was lost). */
+    val accessKeyUnreadable: Boolean
+        get() = !prefsFile.getString("access_key_enc", null).isNullOrEmpty() && decrypt(prefsFile.getString("access_key_enc", null)) == null
 
     var prefs: Prefs
         get() = Prefs(
             voiceOutput = prefsFile.getBoolean("voice_output", true),
-            autoPlay = prefsFile.getBoolean("auto_play", true),
+            autoPlay = prefsFile.getBoolean("auto_play", false),
             style = prefsFile.getString("voice_style", "balanced") ?: "balanced",
             speed = prefsFile.getFloat("voice_speed", 1.0f),
             interrupt = prefsFile.getBoolean("interrupt", true),
@@ -66,7 +85,7 @@ class Storage(context: Context) {
             .putString("voice_style", p.style).putFloat("voice_speed", p.speed)
             .putBoolean("interrupt", p.interrupt).putBoolean("compact", p.compact)
             .putBoolean("share_location", p.shareLocation).putBoolean("notifications", p.notifications)
-            .putBoolean("developer_mode", p.developer).apply()
+            .putBoolean("developer_mode", p.developer).commit()
 
     /** The newest notice from Gemma already shown on this phone. -1 = never asked yet. */
     var lastNoticeId: Long

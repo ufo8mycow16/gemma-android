@@ -83,6 +83,17 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: The real Gemma server, with a stand-in model
+        run: |
+          pip install -q -r server/requirements-ci.txt
+          python3 tools/ci_server.py > server.log 2>&1 &
+          for i in $(seq 60); do grep -q "ci server ready" server.log && break; sleep 1; done
+          tail -3 server.log
+      - name: Build the app and its tests
+        run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon -q
       - name: Run the app on an emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -90,19 +101,21 @@ jobs:
           arch: x86_64
           target: google_apis
           disable-animations: true
-          script: |
-            python3 tools/fake_gemma.py 7862 > fake.log 2>&1 &
-            sleep 2
-            ./gradlew :app:connectedDebugAndroidTest --no-daemon 2>&1 | tee ui.log
+          script: bash tools/emulator_run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-screenshots
+          path: shots/
       - name: Record the result
         if: always()
         run: |
           {
             echo "Emulator run for ${GITHUB_SHA::7}: ${{ job.status }}"
             echo '```'
-            grep -E "Tests on|tests completed|BUILD|FAILED|AssertionError|Timeout|Exception|at app\.gemma" ui.log | head -40 || true
+            grep -E "^===|^OK \(|FAILED|AssertionError|Timeout|Exception|at app\.gemma|process after" ui.log | head -60 || true
             echo '--- requests the app made ---'
-            grep -oE '"(GET|POST) [^ ]+ HTTP/1.1" [0-9]+' fake.log | sort | uniq -c | head -30 || true
+            grep -oE '"(GET|POST|PUT|DELETE) [^ ?]+[^ ]* HTTP/1.1" [0-9]+' server.log | sed -E 's/[0-9]+/N/g' | sort | uniq -c | head -40 || true
             echo '```'
           } > ui.md
           cat ui.md

@@ -17,7 +17,8 @@ sealed class MdBlock {
     /** `marker` is "•" for a bullet or "3." for a numbered item. */
     data class Item(val indent: Int, val marker: String, val spans: List<MdSpan>) : MdBlock()
     data class Quote(val spans: List<MdSpan>) : MdBlock()
-    data class Code(val text: String) : MdBlock()
+    /** A code block. `lang` and `filename` come from the fence line (```python app.py); `open` = still being written. */
+    data class Code(val text: String, val lang: String = "", val filename: String = "", val open: Boolean = false) : MdBlock()
     object Rule : MdBlock()
 }
 
@@ -42,13 +43,14 @@ object Markdown {
             val line = lines[i]
             val trimmed = line.trim()
             if (trimmed.startsWith("```")) {
+                // An unclosed fence is a block still being written: it shows as code at once, never as stray backticks.
                 val end = (i + 1 until lines.size).firstOrNull { lines[it].trim().startsWith("```") }
-                if (end != null) {
-                    flush()
-                    out += MdBlock.Code(lines.subList(i + 1, end).joinToString("\n"))
-                    i = end + 1
-                    continue
-                }
+                flush()
+                val (lang, name) = fenceInfo(trimmed.removePrefix("```").trimStart('`'))
+                val body = lines.subList(i + 1, end ?: lines.size).joinToString("\n")
+                out += MdBlock.Code(body, lang, name.ifEmpty { filenameComment(body) }, open = end == null)
+                i = (end ?: lines.size) + 1
+                continue
             }
             val h = heading.find(line)
             val b = bullet.find(line)
@@ -67,6 +69,25 @@ object Markdown {
         flush()
         return out
     }
+
+    private val fileLike = Regex("^[\\w./-]+\\.[A-Za-z0-9]{1,6}$")
+    private val fileComment = Regex("^\\s*(?:#|//)\\s*(?:file:\\s*)?([\\w./-]+\\.(?:py|gd|kt|kts|java|js|ts|c|cpp|h|sh|json|toml|ya?ml|md|tscn|cfg|html|css|sql|rs|go))\\s*$", RegexOption.IGNORE_CASE)
+
+    /** "python app.py", "gdscript title=player.gd" or "python" → (language, filename). */
+    fun fenceInfo(info: String): Pair<String, String> {
+        val parts = info.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return "" to ""
+        var lang = parts[0]
+        var name = ""
+        for (p in parts.drop(1)) {
+            val v = p.substringAfter('=', p).trim('"', '\'')
+            if (fileLike.matches(v)) { name = v; break }
+        }
+        if (name.isEmpty() && fileLike.matches(lang) && lang.contains('.')) { name = lang; lang = lang.substringAfterLast('.') }
+        return lang.lowercase() to name
+    }
+
+    private fun filenameComment(body: String): String = fileComment.find(body.lineSequence().firstOrNull() ?: "")?.groupValues?.get(1) ?: ""
 
     fun inline(text: String): List<MdSpan> {
         val out = ArrayList<MdSpan>()
