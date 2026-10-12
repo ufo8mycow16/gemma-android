@@ -1,0 +1,10 @@
+Baseline: Glen's app.py as received (v9), stand-in model with a realistic cost model
+(4 s per model reload, prompt read 9000 chars/s, 28 words/s), FAKE_SCALE=1.0, 2 rounds, fresh conversation each.
+
+scenario    first word (median)   whole reply (median)
+greeting                  9.25s                  9.26s
+casual                    9.26s                  9.26s
+question                  9.25s                  9.26s
+
+Model calls per turn: research planner (num_ctx 8192) -> chat (num_ctx 32768) -> memory extraction.
+Each change of num_ctx makes Ollama reload the model: 2 reloads before the first word of every reply.

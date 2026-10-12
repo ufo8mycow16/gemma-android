@@ -1,0 +1,8 @@
+v9 chunker run on the stand-in script (tests/make_script.py, styled headings), 7 chunks:
+0 label='Episode 1'  contains the contents list (all four episode titles matched as headings) and Episode 1
+3 label='Episode 3'  starts with Episode 2 text, contains Episode 2's sentence "Episode 3 will reveal what the Council feared."
+4 label='Episode 4'  starts with the end of Episode 3 (labelled Episode 4)
+6 label='Episode 3 | Scotty, command gold'  a table row from the Design Bible became the chunk heading
+overlap tails begin mid-word ("y speaks for a long moment")
+the table was moved to the end of the text, out of reading order
+Index v2 on the same file: tests/test_documents.py, 204 checks pass.
