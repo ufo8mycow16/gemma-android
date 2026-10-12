@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gemma Diagnostics</title>
+<style>
+:root{--bg:#060a14;--panel:#0c1322;--raised:#131c31;--line:#22304f;--text:#e9eefa;--muted:#93a1be;--blue:#4c8dff;
+--warn:#f5b84b;--err:#ff6b6b;--ok:#4fd18b;--debug:#6f7c99;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+header h1{font-size:15px;letter-spacing:.18em;font-weight:500;margin:0 8px 0 0}
+.badge{font:11px var(--mono);color:var(--muted);background:var(--raised);border:1px solid var(--line);border-radius:6px;padding:2px 7px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block;margin-right:6px}
+.dot.live{background:var(--ok);box-shadow:0 0 8px var(--ok)}.dot.down{background:var(--err)}
+button,select,input{font:inherit;color:var(--text);background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:5px 10px}
+button{cursor:pointer}button:hover{border-color:var(--blue)}button.on{background:#1f3f86;border-color:var(--blue)}
+.spacer{flex:1}
+.filters{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap;align-items:center;background:var(--bg)}
+.chip{padding:3px 9px;border-radius:999px;font-size:11px;letter-spacing:.04em;cursor:pointer;user-select:none;border:1px solid var(--line);color:var(--muted)}
+.chip.on{color:#fff;background:#1f3f86;border-color:var(--blue)}
+.filters input{width:150px}.filters input.wide{width:230px}
+main{flex:1;display:grid;grid-template-columns:300px 1fr;min-height:0}
+#requests{border-right:1px solid var(--line);overflow:auto;min-height:0}
+.req{padding:9px 12px;border-bottom:1px solid #172038;cursor:pointer}
+.req:hover{background:#0f1830}.req.sel{background:#14234a}
+.req .top{display:flex;gap:6px;align-items:center;font:12px var(--mono)}
+.req .route{font-size:10px;padding:1px 6px;border-radius:5px;background:var(--raised);color:var(--blue)}
+.req .meta{color:var(--muted);font-size:11px;margin-top:2px}
+.req .bad{color:var(--err)}
+#right{display:flex;flex-direction:column;min-height:0;position:relative}
+#path{display:none;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel);overflow-x:auto;white-space:nowrap}
+#path .step{display:inline-block;vertical-align:top;margin-right:6px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--raised);font-size:11px;max-width:260px;white-space:normal}
+#path .step b{display:block;font-size:10px;letter-spacing:.08em;color:var(--blue)}
+#path .arrow{display:inline-block;color:var(--muted);margin-right:6px;vertical-align:top;padding-top:12px}
+#log{flex:1;overflow:auto;font:12px/1.5 var(--mono);min-height:0;padding-bottom:30px}
+.row{display:grid;grid-template-columns:92px 62px 96px 92px 1fr;gap:8px;padding:2px 14px;border-bottom:1px solid #0f1628;cursor:default}
+.row:hover{background:#0d1528}.row.sel{background:#16264d}
+.row .ts{color:var(--muted)}.row .lv{font-weight:600}
+.lv.DEBUG{color:var(--debug)}.lv.INFO{color:var(--blue)}.lv.WARNING{color:var(--warn)}.lv.ERROR{color:var(--err)}
+.row .cat{color:#b9c6e4}.row .rid{color:var(--muted);cursor:pointer}.row .rid:hover{color:var(--blue);text-decoration:underline}
+.row .msg{white-space:pre-wrap;word-break:break-word}
+.row .data{grid-column:2/-1;color:#c7d2ea;white-space:pre-wrap;word-break:break-word;background:#0a1120;border:1px solid #182343;border-radius:6px;padding:6px 8px;margin:2px 0 4px;display:none}
+.row.open .data{display:block}
+.row .kv{color:var(--muted)}
+.sep{padding:6px 14px;color:var(--blue);font:11px var(--mono);border-top:1px solid var(--line);background:#0a1224;letter-spacing:.05em}
+#jump{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:none;background:var(--blue);color:#fff;border:none;border-radius:999px;padding:7px 16px;box-shadow:0 6px 24px #0008}
+#empty{color:var(--muted);padding:30px;text-align:center}
+#keybox{display:none;padding:40px;text-align:center}
+@media (max-width:820px){main{grid-template-columns:1fr}#requests{display:none}.row{grid-template-columns:70px 1fr}.row .lv,.row .cat,.row .rid{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1>GEMMA · DIAGNOSTICS</h1>
+  <span class="badge" id="build">build …</span>
+  <span><span class="dot" id="dot"></span><span id="state">connecting</span></span>
+  <span class="spacer"></span>
+  <button id="pause" title="Stop following new events">Pause</button>
+  <button id="copySel">Copy selected</button>
+  <button id="copyReq">Copy request</button>
+  <button id="copyAll">Copy all</button>
+  <button id="export">Export</button>
+  <button id="clear" title="Clears this view; log files are kept">Clear</button>
+</header>
+<div class="filters" id="filters">
+  <span id="chips"></span>
+  <select id="level"><option value="">All levels</option><option value="DEBUG,INFO,WARNING,ERROR">Debug and up</option>
+    <option value="INFO,WARNING,ERROR" selected>Info and up</option><option value="WARNING,ERROR">Warnings and errors</option><option value="ERROR">Errors</option></select>
+  <input id="q" class="wide" placeholder="Search text…">
+  <input id="rid" placeholder="Request id">
+  <input id="cid" placeholder="Conversation">
+  <input id="doc" placeholder="Document">
+  <input id="jid" placeholder="Job">
+</div>
+<div id="keybox">This window needs Gemma's access key (the same one the chat page uses).<br><br>
+  <input id="keyin" type="password" placeholder="Access key" style="width:280px"> <button id="keysave">Open</button></div>
+<main id="main">
+  <aside id="requests"></aside>
+  <section id="right">
+    <div id="path"></div>
+    <div id="log"><div id="empty">Waiting for events…</div></div>
+    <button id="jump">Jump to latest</button>
+  </section>
+</main>
+<script>
+const CATS=["ALL","CHAT","INTENT","CONTEXT","DOCUMENT","RETRIEVAL","MODEL","TOOLS","PLUGIN","CLAUDE_CODE","IMAGE","TTS","API","JOB","ARTIFACT","SECURITY","SYSTEM","ERROR"];
+const $=id=>document.getElementById(id);
+let key=null;try{key=localStorage.getItem('gemma_key')}catch(e){}
+const state={events:[],lastSeq:0,cats:new Set(["ALL"]),paused:false,selected:new Set(),rid:"",follow:true,newCount:0,ctrl:null};
+function headers(){return key?{Authorization:"Bearer "+key}:{}}
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function chips(){$("chips").innerHTML=CATS.map(c=>`<span class="chip ${state.cats.has(c)?"on":""}" data-c="${c}">${c.replace("_"," ")}</span>`).join(" ")}
+$("chips").onclick=e=>{const c=e.target.dataset.c;if(!c)return;if(c==="ALL"){state.cats=new Set(["ALL"])}else{state.cats.delete("ALL");state.cats.has(c)?state.cats.delete(c):state.cats.add(c);if(!state.cats.size)state.cats.add("ALL")}chips();rerender()};
+function filters(){return{cats:state.cats.has("ALL")?"":[...state.cats].join(","),levels:$("level").value,q:$("q").value.trim(),rid:$("rid").value.trim(),cid:$("cid").value.trim(),doc:$("doc").value.trim(),jid:$("jid").value.trim()}}
+function matches(r){const f=filters();if(f.cats&&!f.cats.split(",").includes(r.cat))return false;if(f.levels&&!f.levels.split(",").includes(r.level))return false;
+ if(f.rid&&r.rid!==f.rid)return false;if(f.cid&&String(r.cid)!==f.cid)return false;if(f.doc&&String(r.doc)!==f.doc)return false;if(f.jid&&r.jid!==f.jid)return false;
+ if(f.q&&!JSON.stringify(r).toLowerCase().includes(f.q.toLowerCase()))return false;return true}
+function time(ts){return ts.slice(11,23)}
+function fmtData(d){if(!d)return"";return Object.entries(d).map(([k,v])=>`<span class="kv">${esc(k)}=</span>${esc(typeof v==="object"?JSON.stringify(v):v)}`).join("  ")}
+function rowHtml(r){const brief=r.data?Object.entries(r.data).slice(0,4).map(([k,v])=>`${k}=${typeof v==="object"?JSON.stringify(v):v}`).join(" ").slice(0,180):"";
+ return `<div class="row ${state.selected.has(r.seq)?"sel":""}" data-seq="${r.seq}"><span class="ts">${time(r.ts)}</span><span class="lv ${r.level}">${r.level}</span><span class="cat">${r.cat}</span><span class="rid" data-rid="${esc(r.rid||"")}">${esc((r.rid||"").slice(0,10))}</span><span class="msg">${esc(r.msg)}${brief?` <span class="kv">${esc(brief)}</span>`:""}</span><div class="data">${fmtData(r.data)}${r.doc!=null?`  <span class="kv">doc=</span>${esc(r.doc)}`:""}${r.jid?`  <span class="kv">job=</span>${esc(r.jid)}`:""}${r.cid!=null?`  <span class="kv">conversation=</span>${esc(r.cid)}`:""}</div></div>`}
+function nearBottom(){const l=$("log");return l.scrollHeight-l.scrollTop-l.clientHeight<60}
+function rerender(){const l=$("log");const rows=state.events.filter(matches);let html="",prev=null;
+ for(const r of rows){if(r.rid&&r.rid!==prev&&r.msg==="turn received")html+=`<div class="sep">── request ${esc(r.rid)} · conversation ${esc(r.cid)} · ${esc(r.ts.slice(0,19).replace("T"," "))} ──</div>`;prev=r.rid||prev;html+=rowHtml(r)}
+ l.innerHTML=html||'<div id="empty">No events match these filters.</div>';l.scrollTop=l.scrollHeight;state.newCount=0;$("jump").style.display="none";path();requests()}
+function append(r){state.events.push(r);if(state.events.length>20000)state.events.splice(0,5000);if(r.seq>state.lastSeq)state.lastSeq=r.seq;
+ if(state.paused||!matches(r))return;const l=$("log");const follow=nearBottom();const empty=$("empty");if(empty)empty.remove();
+ if(r.rid&&r.msg==="turn received")l.insertAdjacentHTML("beforeend",`<div class="sep">── request ${esc(r.rid)} · conversation ${esc(r.cid)} · ${esc(r.ts.slice(0,19).replace("T"," "))} ──</div>`);
+ l.insertAdjacentHTML("beforeend",rowHtml(r));
+ if(follow){l.scrollTop=l.scrollHeight}else{state.newCount++;$("jump").textContent=`${state.newCount} new · Jump to latest`;$("jump").style.display="block"}
+ scheduleSide()}
+let sideTimer=null;function scheduleSide(){if(sideTimer)return;sideTimer=setTimeout(()=>{sideTimer=null;requests();path()},400)}
+$("jump").onclick=()=>{const l=$("log");l.scrollTo({top:l.scrollHeight,behavior:"smooth"});state.newCount=0;$("jump").style.display="none"};
+$("log").addEventListener("scroll",()=>{if(nearBottom()){state.newCount=0;$("jump").style.display="none"}});
+$("log").onclick=e=>{const rid=e.target.closest(".rid");if(rid&&rid.dataset.rid){$("rid").value=rid.dataset.rid;rerender();return}
+ const row=e.target.closest(".row");if(!row)return;const seq=+row.dataset.seq;
+ if(e.shiftKey||e.ctrlKey||e.metaKey){state.selected.has(seq)?state.selected.delete(seq):state.selected.add(seq);row.classList.toggle("sel")}else{row.classList.toggle("open")}};
+function requests(){const by=new Map();for(const r of state.events){if(!r.rid)continue;let x=by.get(r.rid);if(!x){x={rid:r.rid,cid:r.cid,first:r.ts,route:"",status:"",ms:"",err:0,text:""};by.set(r.rid,x)}
+  if(r.level==="ERROR")x.err++;const d=r.data||{};if(r.msg==="route chosen")x.route=d.intent||"";if(r.msg==="turn finished"){x.status=d.status;x.ms=d.ms}if(r.msg==="turn received")x.text=`${d.chars} chars${(d.documents||[]).length?" · "+d.documents.length+" file(s)":""}`}
+ const list=[...by.values()].sort((a,b)=>a.first<b.first?1:-1).slice(0,150);const cur=$("rid").value.trim();
+ $("requests").innerHTML=list.map(x=>`<div class="req ${x.rid===cur?"sel":""}" data-rid="${esc(x.rid)}"><div class="top">${esc(x.rid.slice(0,12))} ${x.route?`<span class="route">${esc(x.route)}</span>`:""}${x.err?`<span class="bad">● ${x.err}</span>`:""}</div><div class="meta">${esc(x.first.slice(11,19))} · conv ${esc(x.cid)} · ${esc(x.text)}${x.ms?` · ${Math.round(x.ms)} ms`:""}${x.status&&x.status!==200?` · <span class="bad">${esc(x.status)}</span>`:""}</div></div>`).join("")||'<div id="empty">No requests yet</div>'}
+$("requests").onclick=e=>{const r=e.target.closest(".req");if(!r)return;$("rid").value=$("rid").value===r.dataset.rid?"":r.dataset.rid;rerender()};
+const STEPS=[["USER",r=>r.msg==="turn received"],["INTENT",r=>r.cat==="INTENT"],["CONTEXT",r=>r.cat==="CONTEXT"],["DOCUMENT / RETRIEVAL",r=>r.cat==="DOCUMENT"||r.cat==="RETRIEVAL"],
+ ["MODEL / TOOL",r=>["MODEL","TOOLS","PLUGIN","CLAUDE_CODE","IMAGE"].includes(r.cat)],["RESPONSE",r=>r.msg==="turn finished"]];
+function path(){const rid=$("rid").value.trim();const p=$("path");if(!rid){p.style.display="none";return}const ev=state.events.filter(r=>r.rid===rid);p.style.display="block";
+ p.innerHTML=STEPS.map(([name,test])=>{const hits=ev.filter(test);if(!hits.length)return"";const h=hits.slice(-3).map(r=>{const d=r.data||{};const bits=[r.msg];
+  for(const k of ["intent","target","why","decision","ms","ttft_ms","system_chars","document_chars","heading","stop_boundary","evidence_chars","status","purpose","num_ctx"])if(d[k]!=null)bits.push(`${k}=${typeof d[k]==="object"?JSON.stringify(d[k]):d[k]}`);return esc(bits.join(" · "))}).join("<br>");
+  return `<span class="step"><b>${name}</b>${h}</span>`}).filter(Boolean).join('<span class="arrow">→</span>')}
+function textOf(list){return list.map(r=>JSON.stringify(r)).join("\n")}
+async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){const a=document.createElement("textarea");a.value=t;document.body.appendChild(a);a.select();document.execCommand("copy");a.remove()}}
+$("copySel").onclick=()=>copy(textOf(state.events.filter(r=>state.selected.has(r.seq))));
+$("copyReq").onclick=()=>{const rid=$("rid").value.trim();if(!rid){alert("Pick a request first (click its id).");return}copy(textOf(state.events.filter(r=>r.rid===rid)))};
+$("copyAll").onclick=()=>copy(textOf(state.events.filter(matches)));
+$("export").onclick=async()=>{const f=filters();const qs=new URLSearchParams(f).toString();const r=await fetch("/api/v1/diagnostics/export?"+qs,{headers:headers()});const b=await r.blob();
+ const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="gemma-diagnostics-"+new Date().toISOString().replace(/[:.]/g,"-")+".jsonl";a.click()};
+$("clear").onclick=async()=>{await fetch("/api/v1/diagnostics/clear",{method:"POST",headers:headers()});state.events=[];state.selected.clear();rerender()};
+$("pause").onclick=()=>{state.paused=!state.paused;$("pause").classList.toggle("on",state.paused);$("pause").textContent=state.paused?"Resume":"Pause";if(!state.paused)rerender()};
+for(const id of ["level","q","rid","cid","doc","jid"])$(id).addEventListener("input",()=>{clearTimeout(window._ft);window._ft=setTimeout(rerender,200)});
+async function stream(){if(state.ctrl)state.ctrl.abort();const ctrl=new AbortController();state.ctrl=ctrl;
+ try{const r=await fetch("/api/v1/diagnostics/stream?after="+state.lastSeq,{headers:headers(),signal:ctrl.signal});
+  if(r.status===401){askKey();return}$("dot").className="dot live";$("state").textContent="live";
+  const reader=r.body.getReader();const dec=new TextDecoder();let buf="";
+  while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let i;
+   while((i=buf.indexOf("\n"))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);if(!line.trim())continue;let rec;try{rec=JSON.parse(line)}catch(e){continue}if(rec.ping)continue;if(rec.seq>state.lastSeq||!state.events.length)append(rec)}}
+ }catch(e){if(ctrl.signal.aborted)return}
+ $("dot").className="dot down";$("state").textContent="reconnecting";setTimeout(stream,1500)}
+async function build(){try{const r=await fetch("/api/v1/build",{headers:headers()});if(r.status===401)return askKey();const b=await r.json();
+ $("build").textContent=`v${b.version}${b.build?" · build "+b.build:""}${b.commit?" · "+b.commit:""}${b.dirty?" (modified)":""}${b.built_at?" · "+b.built_at.slice(0,16).replace("T"," "):""}`}catch(e){}}
+function askKey(){$("keybox").style.display="block";$("main").style.display="none";$("filters").style.display="none"}
+$("keysave").onclick=()=>{key=$("keyin").value.trim();try{localStorage.setItem("gemma_key",key)}catch(e){}$("keybox").style.display="none";$("main").style.display="grid";$("filters").style.display="flex";build();stream()};
+chips();build();stream();
+</script>
+</body>
+</html>

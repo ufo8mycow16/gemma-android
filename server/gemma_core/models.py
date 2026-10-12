@@ -26,7 +26,7 @@ from . import observe
 OLLAMA = os.environ.get("GEMMA_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 DEFAULT_MODEL = os.environ.get("GEMMA_MODEL", "gemma4:12b").strip()
 DEFAULT_CONTEXT = int(os.environ.get("GEMMA_NUM_CTX", "32768"))
-PURPOSES = ("chat", "classify", "summarise", "vision", "code", "performance", "embed")
+PURPOSES = ("chat", "classify", "summarise", "research", "vision", "code", "performance", "embed")
 
 _ROLES: dict[str, str] = {}
 _CONTEXT: dict[str, int] = {}

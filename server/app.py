@@ -2001,7 +2001,7 @@ The research-call budget is a ceiling, not a target."""
             r = ollama_chat(
                 research_messages,
                 tools=research_tools
-            )
+            , purpose='research')
             data = r.json()
             msg = data.get("message") or {}
         except Exception as e:
@@ -2326,7 +2326,7 @@ USER MESSAGE:
         r=ollama_chat([
           {"role":"system","content":"You are a conservative memory extraction component. Output valid JSON only."},
           {"role":"user","content":prompt}
-        ])
+        ], purpose='classify')
         text=r.json()["message"]["content"].strip()
         m=re.search(r"\[[\s\S]*\]",text)
         if not m:
@@ -2559,7 +2559,7 @@ def refresh_summary(cid, force=False):
                 f"SUMMARY SO FAR:\n{prev['summary'] if prev else '(none yet)'}\n\n"
                 f"NEW MESSAGES:\n{transcript}"
             )}
-        ], temperature=0.2)
+        ], temperature=0.2, purpose='summarise')
         summary = (r.json()["message"].get("content") or "").strip()[:2500]
     except Exception as e:
         print("Conversation summary skipped:", e)
@@ -5160,6 +5160,18 @@ def connect_google(open_browser=True, wait_seconds=600):
         return 1
     print("Now restart Gemma.")
     return 0
+
+
+WEB_DIR = APP_DIR / "web"
+from gemma_core import diag_api  # noqa: E402
+diag_api.register(app)
+
+
+@app.get("/diagnostics")
+def diagnostics_page():
+    """The live Diagnostics window. The page itself holds no data; it reads the key-protected API."""
+    from flask import send_from_directory
+    return send_from_directory(WEB_DIR, "diagnostics.html", max_age=0)
 
 
 @app.get("/")
