@@ -80,12 +80,14 @@ class Storage(context: Context) {
             notifications = prefsFile.getBoolean("notifications", true),
             developer = prefsFile.getBoolean("developer_mode", false),
         )
-        set(p) = prefsFile.edit()
+        set(p) {
+            prefsFile.edit()
             .putBoolean("voice_output", p.voiceOutput).putBoolean("auto_play", p.autoPlay)
             .putString("voice_style", p.style).putFloat("voice_speed", p.speed)
             .putBoolean("interrupt", p.interrupt).putBoolean("compact", p.compact)
             .putBoolean("share_location", p.shareLocation).putBoolean("notifications", p.notifications)
             .putBoolean("developer_mode", p.developer).commit()
+        }
 
     /** The newest notice from Gemma already shown on this phone. -1 = never asked yet. */
     var lastNoticeId: Long
