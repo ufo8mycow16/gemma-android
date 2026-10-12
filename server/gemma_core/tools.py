@@ -111,7 +111,11 @@ def _usable(tool: Tool) -> bool:
     if g is None:
         return True
     try:
-        return bool(g()[0]) or g()[1] in ("not_connected", "auth_expired")   # offered, so Gemma can say how to connect
+        usable, status, _ = g()
+        # Offered even when its service is down or not set up: calling it returns the real reason ("ComfyUI isn't
+        # reachable…"), which Gemma passes on, instead of her claiming she has no such ability.
+        return bool(usable) or status in ("not_connected", "auth_expired", "unavailable", "needs_reauth", "needs_reconsent",
+                                          "insufficient_permissions", "rate_limited", "error")
     except Exception:
         return False
 
