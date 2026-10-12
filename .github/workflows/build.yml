@@ -1,7 +1,8 @@
 name: Build Gemma APK
 on:
   push:
-    branches: [main]
+    branches: [main, dev/full-pass]
+    paths-ignore: ['server/**', '**.md']
   workflow_dispatch:
 permissions:
   contents: write
@@ -42,8 +43,10 @@ jobs:
           cp "$APK" gemma.apk
       - name: Publish the APK as the latest release
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest gemma.apk --title "Gemma for Android (latest build)" --notes-file notes.md
+          # main publishes "latest"; the development branch publishes "dev-latest" and never touches main's release.
+          if [ "$GITHUB_REF_NAME" = "main" ]; then TAG=latest; TITLE="Gemma for Android (latest build)"; else TAG=dev-latest; TITLE="Gemma for Android (development build, $GITHUB_REF_NAME)"; fi
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" gemma.apk --title "$TITLE" --notes-file notes.md --target "$GITHUB_SHA" $( [ "$TAG" = dev-latest ] && echo --prerelease )
       - uses: actions/upload-artifact@v4
         with:
           name: gemma-apk
